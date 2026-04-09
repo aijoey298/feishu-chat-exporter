@@ -40,6 +40,65 @@ def check_dependencies():
     return True
 
 
+def fetch_messages(chat_id: str, user_id: str, output_dir: Path, output_file: Path) -> int:
+    """通过lark-cli获取消息并保存到messages.json，返回消息总数"""
+    is_p2p = bool(user_id)
+    all_messages = []
+    page_token = ""
+    page_num = 0
+
+    print("正在获取消息（分页中）...")
+    while True:
+        page_num += 1
+        cmd = [
+            "lark-cli", "im", "+chat-messages-list",
+            "--sort", "asc",
+            "--page-size", "50",
+            "--format", "json",
+        ]
+        if is_p2p:
+            cmd.extend(["--user-id", user_id])
+        else:
+            cmd.extend(["--chat-id", chat_id])
+
+        if page_token:
+            cmd.extend(["--page-token", page_token])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            print(f"获取消息失败（page {page_num}）: {result.stderr[:100]}")
+            break
+
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            break
+
+        msgs = data.get("data", {}).get("messages", [])
+        has_more = data.get("data", {}).get("has_more", False)
+        page_token = data.get("data", {}).get("page_token", "") or ""
+
+        if not msgs:
+            break
+
+        all_messages.extend(msgs)
+        print(f"  第 {page_num} 页: {len(msgs)} 条消息 (累计: {len(all_messages)})")
+
+        if not has_more or not page_token:
+            break
+
+    if not all_messages:
+        print("未获取到任何消息")
+        return 0
+
+    output_dir.mkdir(exist_ok=True, parents=True)
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(all_messages, f, ensure_ascii=False, indent=2)
+
+    print(f"消息获取完成: {len(all_messages)} 条，保存至 {output_file}")
+    return len(all_messages)
+
+
 def download_resource(msg_id: str, file_key: str, file_type: str, dest_path: Path, export_dir: Path) -> bool:
     """下载单个资源文件"""
     try:
@@ -330,6 +389,7 @@ def main():
     parser.add_argument("--user-id", dest="user_id", help="P2P用户ID (ou_xxx)")
     parser.add_argument("--output", dest="output", default=".", help="输出目录 (默认当前目录)")
     parser.add_argument("--workers", dest="workers", type=int, default=16, help="并发下载线程数 (默认16)")
+    parser.add_argument("--fetch", dest="fetch", action="store_true", help="自动获取消息（无需手动准备messages.json）")
     args = parser.parse_args()
 
     if not args.chat_id and not args.user_id:
@@ -346,14 +406,20 @@ def main():
     images_dir = res_dir / "images"
     files_dir = res_dir / "files"
 
-    output_dir.mkdir(exist_ok=True)
-    images_dir.mkdir(exist_ok=True)
-    files_dir.mkdir(exist_ok=True)
+    output_dir.mkdir(exist_ok=True, parents=True)
+    images_dir.mkdir(exist_ok=True, parents=True)
+    files_dir.mkdir(exist_ok=True, parents=True)
 
     messages_file = output_dir / "messages.json"
     if not messages_file.exists():
-        print(f"错误: 找不到 messages.json，请先运行导出命令获取消息数据")
-        return 1
+        if args.fetch:
+            fetched = fetch_messages(chat_id, args.user_id, output_dir, messages_file)
+            if fetched == 0:
+                print("错误: 无法获取消息，请检查 ID 是否正确或 lark-cli 授权状态")
+                return 1
+        else:
+            print(f"错误: 找不到 messages.json，请使用 --fetch 自动获取，或先运行 lark-cli im +chat-messages-list 获取消息数据")
+            return 1
 
     with open(messages_file, encoding="utf-8") as f:
         messages = json.load(f)

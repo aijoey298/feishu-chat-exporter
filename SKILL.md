@@ -10,7 +10,7 @@ version: 0.1.0
 
 ## 功能概述
 
-此 skill 通过 `lark-cli` 调用飞书开放消息历史 API，获取指定会话的消息列表，自动下载聊天中的图片、文件和表情回应，最终渲染为独立的 `report_with_images.html` 文件。所有多媒体资源以内联 base64 或相对路径引用，无须网络连接即可浏览。
+此 skill 通过 `lark-cli` 调用飞书开放消息历史 API，获取指定会话的消息列表，自动下载聊天中的图片、文件和表情回应，最终渲染为独立的 `report.html` 文件（仿飞书样式，含内嵌多媒体）。所有资源以相对路径引用，无须网络连接即可浏览。
 
 ## 前置依赖检查
 
@@ -99,16 +99,19 @@ python3 scripts/export.py --chat-id <id> --output <dir> --workers 16
 
 ## 引用资源
 
-- **`scripts/export.py`** — 核心导出脚本，实现消息拉取、多媒体下载和 HTML 渲染全流程
-- **`docs/SETUP.md`** — lark-cli 安装、授权及环境配置详细指南；包含常见授权错误处理方法
+- **`scripts/export.py`** — 报告生成脚本：读取 messages.json（lark-cli 导出的原始消息数据），并发下载多媒体文件，渲染仿飞书样式的 HTML 报告
+- **`docs/SETUP.md`** — lark-cli 安装、授权及环境配置详细指南；包含多平台安装命令、Device Code 授权流程和常见错误处理
 
 ## 常见问题
 
-**Q: lark-cli 提示 Permission denied**
-→ 参考 `docs/SETUP.md` 中的「权限范围」章节，确保已申请 `im:chat:readonly` 等必要 scope。
+**Q: 提示"找不到 messages.json"**
+→ 确保先通过 `lark-cli im +messages-export` 导出消息数据，再运行 export.py。
 
-**Q: 导出消息数量不完整**
-→ 飞书历史消息 API 对单次请求返回量有限制，脚本会自动分页拉取。如仍缺失消息，检查账户是否有该群聊的查看权限。
+**Q: lark-cli 提示 Permission denied**
+→ 参考 `docs/SETUP.md`，确保已申请 `im:chat:readonly`、`im:message:readonly` 等必要权限范围，且应用已发布或获得管理员审批。
 
 **Q: 图片下载失败**
-→ 部分图片可能因发送者设置了访问限制而无法下载，脚本会用占位符替代并记录失败项到日志。
+→ 部分图片可能因发送者设置了访问限制而无法下载，脚本会用占位符替代并在报告中记录失败项。
+
+**Q: 如何提高下载速度？**
+→ 使用 `--workers` 参数增加并发线程数，默认 16，网络条件好时可设为 32 或更高。
