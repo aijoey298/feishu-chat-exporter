@@ -7,12 +7,12 @@
 """
 
 import json
-import os
 import re
 import subprocess
 import time
 import argparse
 import shutil
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
@@ -20,9 +20,9 @@ import threading
 
 # 文件大小限制（字节）
 SIZE_LIMITS = {
-    "audio": 30 * 1024 * 1024,   # 30MB
-    "video": 100 * 1024 * 1024,  # 100MB
-    "pdf": 50 * 1024 * 1024,     # 50MB
+    "audio": 30 * 1024 * 1024,    # 30MB
+    "video": 100 * 1024 * 1024,   # 100MB
+    "pdf": 50 * 1024 * 1024,      # 50MB
 }
 SIZE_LIMITS["mp3"] = SIZE_LIMITS["audio"]
 SIZE_LIMITS["m4a"] = SIZE_LIMITS["audio"]
@@ -114,12 +114,10 @@ def download_resource(msg_id: str, file_key: str, file_type: str, dest_path: Pat
             capture_output=True, text=True, cwd=str(export_dir), timeout=120
         )
         if result.returncode == 0:
-            # 临时文件可能在 export_dir 下，需要移到目标位置
             tmp = export_dir / dest_path.name
             if tmp.exists() and tmp != dest_path:
                 tmp.rename(dest_path)
             elif not dest_path.exists():
-                # 尝试查找下载的文件
                 for f in export_dir.glob(f"{file_key}.*"):
                     if not dest_path.exists() or f.stat().st_mtime > dest_path.stat().st_mtime:
                         f.rename(dest_path)
@@ -142,7 +140,7 @@ def escape_html(text: str) -> str:
 
 def get_avatar(name: str) -> str:
     if not name or name in ("系统消息", ""):
-        return "&#9881;"  # gear
+        return "&#9881;"
     return name[0].upper()
 
 
@@ -151,37 +149,127 @@ def get_file_size_limit(ext: str) -> int | None:
     return SIZE_LIMITS.get(ext.lower().lstrip("."))
 
 
-def is_file_embeddable(path: Path, file_type: str) -> bool:
-    """判断文件是否满足嵌入条件"""
+def is_file_embeddable(path: Path) -> bool:
+    """判断文件是否满足嵌入条件（图片无条件，其他按大小限制）"""
     if not path.exists():
         return False
-    if file_type in ("image",):
-        return True  # 图片无上限
     ext = path.suffix.lower()
+    if ext in (".jpg", ".jpeg", ".png", ".gif"):
+        return True  # 图片无上限
     limit = get_file_size_limit(ext)
     if limit is None:
         return False
     return path.stat().st_size <= limit
 
 
+def resolve_file_type(file_key: str) -> str:
+    """根据 file_key 前缀猜测资源类型"""
+    if file_key.startswith("img_"):
+        return "image"
+    if file_key.startswith("audio_"):
+        return "audio"
+    if file_key.startswith("video_"):
+        return "video"
+    return "file"
+
+
+def make_download_link(file_key: str, fname: str, subdir: Path, resource_map: dict) -> str:
+    """为无法嵌入的文件生成下载链接"""
+    path = resource_map.get(file_key)
+    if path and path.exists():
+        rel = f"{subdir.name}/{path.name}"
+        size = path.stat().st_size
+        size_str = _format_size(size)
+        return f'<br><a class="file-link" href="{rel}" download="{escape_html(fname)}">&#128196; {escape_html(fname)} ({size_str})</a>'
+    else:
+        return f'<br><span class="file-missing">&#128196; {escape_html(fname)} (未下载)</span>'
+
+
+def _format_size(size: int) -> str:
+    if size < 1024:
+        return f"{size}B"
+    elif size < 1024 * 1024:
+        return f"{size/1024:.1f}KB"
+    else:
+        return f"{size/1024/1024:.1f}MB"
+
+
 def format_content(content: str, resource_map: dict, subdir: Path) -> str:
-    """替换消息内容中的图片引用为<img>标签，并处理链接和@"""
+    """替换消息内容中的图片引用为<img>标签，处理音视频/PDF嵌入，处理文件下载链接"""
     if not content:
         return ""
 
-    # 替换 [Image: img_v3_xxx] 或直接嵌入 img_v3_xxx 引用
+    # 替换 [Image: img_v3_xxx] 和行内 img_v3_xxx
     def replace_image(match):
         key = match.group(1)
         path = resource_map.get(key)
         if path and path.exists():
+            ext = path.suffix.lower()
             rel = f"{subdir.name}/{path.name}"
-            return f'<br><img src="{rel}" alt="图片" loading="lazy"><br>'
+            if ext in (".jpg", ".jpeg", ".png", ".gif"):
+                return f'<br><img src="{rel}" alt="图片" loading="lazy"><br>'
+            elif ext in (".mp3", ".m4a", ".wav"):
+                return f'<br><audio controls src="{rel}"></audio><br>'
+            elif ext in (".mp4", ".mov"):
+                return f'<br><video controls src="{rel}"></video><br>'
+            elif ext == ".pdf":
+                return f'<br><object data="{rel}" type="application/pdf" width="100%" height="500"><a href="{rel}">下载PDF</a></object><br>'
+            else:
+                return make_download_link(key, path.name, subdir, resource_map)
         return f'<br><div class="loading-img">[图片未下载: {escape_html(key[:20])}...]</div><br>'
 
     content = re.sub(r'\[Image: (img_v3_[a-zA-Z0-9_-]+)\]', replace_image, content)
-
-    # 飞书 post 内容中的图片 key
     content = re.sub(r'(img_v3_[a-zA-Z0-9_-]+)', replace_image, content)
+
+    # 处理 <file key="..." name="..."/> XML格式
+    def replace_file_tag(match):
+        xml_str = match.group(0)
+        try:
+            root = ET.fromstring(xml_str)
+            file_key = root.get("key", "").strip()
+            fname = root.get("name", file_key).strip()
+        except ET.ParseError:
+            file_key = re.search(r'key="([^"]+)"', xml_str)
+            fname = re.search(r'name="([^"]+)"', xml_str)
+            file_key = file_key.group(1).strip() if file_key else ""
+            fname = fname.group(1).strip() if fname else file_key
+
+        if not file_key:
+            return ""
+
+        path = resource_map.get(file_key)
+        if path and path.exists():
+            ext = path.suffix.lower()
+            rel = f"{subdir.name}/{path.name}"
+            if ext in (".mp3", ".m4a", ".wav"):
+                return f'<br><audio controls src="{rel}"></audio>'
+            elif ext in (".mp4", ".mov"):
+                return f'<br><video controls src="{rel}"></video>'
+            elif ext == ".pdf":
+                return f'<br><object data="{rel}" type="application/pdf" width="100%" height="500"><a href="{rel}">下载PDF</a></object>'
+            else:
+                return make_download_link(file_key, fname, subdir, resource_map)
+        else:
+            return make_download_link(file_key, fname, subdir, resource_map)
+
+    content = re.sub(r'<file[^>]+>', replace_file_tag, content)
+
+    # 处理 <video ... cover_image_key="..." ...> 中的封面图
+    def replace_video_cover(match):
+        xml_str = match.group(0)
+        cover_key = re.search(r'cover_image_key="(img_v3_[a-zA-Z0-9_-]+)"', xml_str)
+        if not cover_key:
+            return match.group(0)
+        key = cover_key.group(1)
+        path = resource_map.get(key)
+        if path and path.exists():
+            ext = path.suffix.lower()
+            if ext in (".jpg", ".jpeg", ".png", ".gif"):
+                rel = f"{subdir.name}/{path.name}"
+                return f'<br><img src="{rel}" alt="视频封面" loading="lazy">'
+        return ""
+
+    content = re.sub(r'<video[^>]+>', replace_video_cover, content)
 
     # 链接
     content = re.sub(r'(https?://[^\s<]+)', r'<a href="\1" target="_blank">\1</a>', content)
@@ -257,11 +345,15 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC
 .msg-content img:hover {{ transform: scale(1.02); box-shadow: 0 4px 20px rgba(0,0,0,0.15); }}
 .msg-content audio {{ display: block; margin: 8px 0; width: 100%; }}
 .msg-content video {{ display: block; margin: 8px 0; max-width: 100%; border-radius: 8px; }}
+.msg-content object {{ border-radius: 8px; margin: 8px 0; }}
 .msg-content a {{ color: #fe6803; text-decoration: none; }}
 .msg-content a:hover {{ text-decoration: underline; }}
 .system {{ background: #f8f8f8; border: 1px dashed #ddd; }}
 .system .msg-content {{ color: #888; font-size: 13px; }}
 .mention {{ color: #007aff; font-weight: 500; }}
+.file-link {{ display: inline-flex; align-items: center; gap: 4px; background: #f0f4ff; padding: 6px 12px; border-radius: 6px; color: #0066cc; font-size: 13px; text-decoration: none; margin: 4px 0; }}
+.file-link:hover {{ background: #e0e8ff; text-decoration: none; }}
+.file-missing {{ color: #999; font-size: 13px; }}
 .footer {{ text-align: center; color: #bbb; font-size: 12px; padding: 30px; }}
 .loading-img {{ background: #f0f0f0; border-radius: 8px; padding: 40px; text-align: center; color: #999; font-size: 13px; }}
 </style>
@@ -301,12 +393,14 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC
 def extract_resources(messages: list) -> tuple[dict, dict, dict]:
     """
     从消息中提取所有资源引用。
-    返回: (image_refs, audio_refs, video_refs, other_refs)
-    其中 refs = {file_key: msg_id}
+    返回: (image_refs, file_refs, media_refs)
+    image_refs: key -> msg_id
+    file_refs: key -> (msg_id, fname, ftype)
+    media_refs: key -> msg_id
     """
     image_refs = {}
-    file_refs = {}  # file_key -> (msg_id, file_name, file_type)
-    media_refs = {}  # file_key -> msg_id
+    file_refs = {}
+    media_refs = {}
 
     for msg in messages:
         msg_id = msg.get("message_id", "")
@@ -320,40 +414,60 @@ def extract_resources(messages: list) -> tuple[dict, dict, dict]:
                     image_refs[key] = msg_id
 
         elif msg_type == "post":
-            # 匹配图片 key
             keys = re.findall(r'img_v3_[a-zA-Z0-9_-]+', content)
             for key in keys:
                 if key not in image_refs:
                     image_refs[key] = msg_id
-            # 匹配文件 key 和 name
-            file_matches = re.findall(r'file_key["\s:]+([^"]+)', content)
-            name_matches = re.findall(r'file_name["\s:]+([^"]+)', content)
-            for i, key in enumerate(file_matches):
-                if key.startswith("msg_file_"):
-                    fname = name_matches[i] if i < len(name_matches) else f"{key}.bin"
-                    if key not in file_refs:
-                        file_refs[key] = (msg_id, fname, "file")
+            # 处理 <file key="..." name="..."/> XML格式
+            for m in re.finditer(r'<file\s+[^>]+>', content):
+                xml_str = m.group(0)
+                try:
+                    root = ET.fromstring(xml_str)
+                    file_key = root.get("key", "").strip()
+                    fname = root.get("name", "").strip()
+                except ET.ParseError:
+                    k = re.search(r'key="([^"]+)"', xml_str)
+                    n = re.search(r'name="([^"]+)"', xml_str)
+                    file_key = k.group(1).strip() if k else ""
+                    fname = n.group(1).strip() if n else file_key
+                if file_key and file_key not in file_refs:
+                    ftype = resolve_file_type(file_key)
+                    file_refs[file_key] = (msg_id, fname or file_key, ftype)
 
         elif msg_type == "media":
-            # 封面图片
             cover_match = re.search(r'cover_image_key="(img_v3_[a-zA-Z0-9_-]+)"', content)
             if cover_match:
                 key = cover_match.group(1)
                 if key not in image_refs:
                     image_refs[key] = msg_id
-            # 文件 key
-            media_keys = re.findall(r'(msg_file_[a-zA-Z0-9_-]+)', content)
-            for key in media_keys:
-                if key not in media_refs:
-                    media_refs[key] = msg_id
+            for m in re.finditer(r'<video\s+[^>]+>', content):
+                xml_str = m.group(0)
+                video_key_match = re.search(r'key="(msg_file_[a-zA-Z0-9_-]+)"', xml_str)
+                video_name_match = re.search(r'name="([^"]+)"', xml_str)
+                if video_key_match:
+                    vk = video_key_match.group(1).strip()
+                    vn = video_name_match.group(1).strip() if video_name_match else vk
+                    if vk not in media_refs:
+                        media_refs[vk] = (msg_id, vn, "video")
+                for k in re.findall(r'(msg_file_[a-zA-Z0-9_-]+)', xml_str):
+                    if k not in media_refs:
+                        media_refs[k] = (msg_id, k, "file")
 
         elif msg_type == "file":
-            keys = re.findall(r'(msg_file_[a-zA-Z0-9_-]+)', content)
-            names = re.findall(r'file_name["\s:]+([^"]+)', content)
-            for i, key in enumerate(keys):
-                fname = names[i] if i < len(names) else f"{key}.bin"
-                if key not in file_refs:
-                    file_refs[key] = (msg_id, fname, "file")
+            for m in re.finditer(r'<file\s+[^>]+>', content):
+                xml_str = m.group(0)
+                try:
+                    root = ET.fromstring(xml_str)
+                    file_key = root.get("key", "").strip()
+                    fname = root.get("name", "").strip()
+                except ET.ParseError:
+                    k = re.search(r'key="([^"]+)"', xml_str)
+                    n = re.search(r'name="([^"]+)"', xml_str)
+                    file_key = k.group(1).strip() if k else ""
+                    fname = n.group(1).strip() if n else file_key
+                if file_key and file_key not in file_refs:
+                    ftype = resolve_file_type(file_key)
+                    file_refs[file_key] = (msg_id, fname or file_key, ftype)
 
     return image_refs, file_refs, media_refs
 
@@ -363,24 +477,10 @@ def build_existing_map(res_dir: Path) -> dict:
     mapping = {}
     for p in res_dir.rglob("*"):
         if p.is_file():
-            # 从文件名提取 key (去掉扩展名)
             key = p.stem
             if key not in mapping:
                 mapping[key] = p
     return mapping
-
-
-def resolve_file_type(file_key: str) -> str:
-    """根据 file_key 猜测资源类型"""
-    if file_key.startswith("img_"):
-        return "image"
-    if file_key.startswith("audio_"):
-        return "audio"
-    if file_key.startswith("video_"):
-        return "video"
-    if file_key.startswith("msg_file_"):
-        return "file"
-    return "file"
 
 
 def main():
@@ -448,9 +548,9 @@ def main():
     for key, (msg_id, fname, ftype) in file_refs.items():
         if key not in existing:
             to_download_files[key] = (msg_id, fname, ftype)
-    for key, msg_id in media_refs.items():
+    for key, (msg_id, fname, ftype) in media_refs.items():
         if key not in existing:
-            to_download_files[key] = (msg_id, f"{key}.bin", "file")
+            to_download_files[key] = (msg_id, fname, ftype)
 
     print(f"需要下载: {len(to_download_images)} 张图片, {len(to_download_files)} 个文件")
 
@@ -462,19 +562,14 @@ def main():
 
     def download_task(item):
         nonlocal progress
-        idx = 0
         if isinstance(item, tuple) and len(item) == 2:
-            # 图片
             key, msg_id = item
             dest = images_dir / f"{key}.jpg"
-            idx_offset = 0
+            ftype = "image"
         else:
-            # 文件
             key, (msg_id, fname, ftype) = item
             dest = files_dir / fname
-            idx_offset = len(to_download_images)
 
-        ftype = resolve_file_type(key) if isinstance(item, tuple) else ftype
         ok = download_resource(msg_id, key, ftype, dest, output_dir)
 
         with counter_lock:
@@ -522,11 +617,8 @@ def main():
     for key, path in resource_map.items():
         if not path.exists():
             continue
-        ext = path.suffix.lower()
-        if ext in EMBEDDABLE_EXTS:
-            limit = get_file_size_limit(ext)
-            if limit is None or path.stat().st_size <= limit:
-                embedded_count += 1
+        if is_file_embeddable(path):
+            embedded_count += 1
 
     total_downloaded = stats["images_downloaded"] + stats["files_downloaded"]
     total_failed = stats["images_failed"] + stats["files_failed"]
