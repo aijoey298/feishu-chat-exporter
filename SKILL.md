@@ -10,7 +10,7 @@ version: 0.1.0
 
 ## 功能概述
 
-此 skill 通过 `lark-cli` 调用飞书开放消息历史 API，获取指定会话的消息列表，自动下载聊天中的图片、文件和表情回应，最终渲染为独立的 `report.html` 文件（仿飞书样式，含内嵌多媒体）。所有资源以相对路径引用，无须网络连接即可浏览。
+此 skill 通过 `lark-cli` 调用飞书开放消息历史 API，获取指定会话的消息列表，自动下载聊天中的图片、文件和表情回应，最终渲染为独立的 `report_with_images.html` 文件（仿飞书样式，含内嵌多媒体）。所有资源以相对路径引用，无须网络连接即可浏览。
 
 ## 前置依赖检查
 
@@ -48,32 +48,25 @@ lark-cli auth status
 
 ### 步骤 3：导出消息并生成报告
 
-导出分为两个阶段：**数据拉取** 和 **报告生成**。脚本 `scripts/export.py` 负责第二阶段，接收 `messages.json`（由 lark-cli 导出的原始消息数据）并生成 HTML 报告。
-
-首先通过 lark-cli 拉取消息历史：
+使用 `--fetch` 参数，脚本自动完成数据拉取和报告生成两个步骤（无需手动准备 messages.json）：
 
 ```bash
-lark-cli im +messages-export --chat-id <id> --output <dir>
-```
-
-将消息数据保存为 JSON 格式到指定目录。然后执行报告生成：
-
-```bash
-python3 scripts/export.py --chat-id <id> --output <dir> --workers 16
+python3 scripts/export.py --chat-id <id> --output <dir> --workers 16 --fetch
 ```
 
 **参数说明：**
 
 - `--chat-id <id>` — 群聊 ID（`oc_xxx`）
 - `--user-id <id>` — P2P 用户 ID（`ou_xxx`），与 `--chat-id` 二选一
-- `--output <dir>` — 输出目录（默认当前目录），包含 `messages.json`
-- `--workers <n>` — 并发下载线程数（默认 16），根据网络条件调整
+- `--output <dir>` — 输出目录（默认当前目录）
+- `--workers <n>` — 并发下载线程数（默认 16），网络好时可设 32
+- `--fetch` — 自动获取消息（推荐使用，无需手动准备 messages.json）
 
 ### 步骤 4：查看报告
 
 导出完成后，在指定输出目录下生成以下文件：
 
-- **`report.html`** — 主报告文件，包含完整消息时间线、内嵌图片和文件下载链接，采用仿飞书样式渲染
+- **`report_with_images.html`** — 主报告文件，包含完整消息时间线、内嵌图片和文件下载链接，采用仿飞书样式渲染
 - **`resources/`** — 下载到本地的多媒体资源目录
   - `resources/images/` — 图片文件
   - `resources/files/` — 附件文件
@@ -81,17 +74,17 @@ python3 scripts/export.py --chat-id <id> --output <dir> --workers 16
 报告路径会在脚本输出末尾显示。确认路径后，询问用户是否需要使用默认浏览器打开预览：
 
 ```
-报告已生成：/path/to/report.html
+报告已生成：/path/to/report_with_images.html
 是否打开浏览器预览？(y/n)
 ```
 
-如用户确认，执行 `open /path/to/report.html`（macOS）或对应平台的浏览器打开命令。
+如用户确认，执行 `open /path/to/report_with_images.html`（macOS）或对应平台的浏览器打开命令。
 
 ## 输出说明
 
 | 文件/目录 | 说明 |
 |---|---|
-| `report.html` | 主报告文件，仿飞书样式渲染，内嵌图片/音视频/PDF（按大小限制），其余文件提供下载链接 |
+| `report_with_images.html` | 主报告文件，仿飞书样式渲染，内嵌图片/音视频/PDF（按大小限制），其余文件提供下载链接 |
 | `resources/images/` | 下载到本地的图片，HTML 中通过相对路径引用 |
 | `resources/files/` | 下载到本地的附件文件（文档、音视频等） |
 
@@ -105,7 +98,7 @@ python3 scripts/export.py --chat-id <id> --output <dir> --workers 16
 ## 常见问题
 
 **Q: 提示"找不到 messages.json"**
-→ 确保先通过 `lark-cli im +messages-export` 导出消息数据，再运行 export.py。
+→ 使用 `--fetch` 参数让脚本自动获取消息，或确保 messages.json 已存在于输出目录中。
 
 **Q: lark-cli 提示 Permission denied**
 → 参考 `docs/SETUP.md`，确保已申请 `im:chat:readonly`、`im:message:readonly` 等必要权限范围，且应用已发布或获得管理员审批。
