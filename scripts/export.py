@@ -4,6 +4,7 @@
 - 支持群聊和P2P聊天
 - 16线程并发下载附件
 - 文件嵌入策略：图片无上限行内显示，音视频/PDF按大小限制嵌入，其他文件仅生成下载链接
+- 增量导出：支持仅获取自上次导出后的新消息
 """
 
 import json
@@ -16,6 +17,11 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+from dataclasses import dataclass, field, asdict
+from typing import Optional
+from datetime import datetime, timezone
+from enum import Enum
+from zoneinfo import ZoneInfo
 
 
 # 文件大小限制（字节）
@@ -32,6 +38,132 @@ SIZE_LIMITS["mov"] = SIZE_LIMITS["video"]
 
 EMBEDDABLE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".mp3", ".m4a", ".wav", ".mp4", ".mov", ".pdf"}
 
+# 增量导出常量
+STATE_FILE = "last_export.json"
+BACKUP_FILE = ".incremental_backup.json"
+CURRENT_VERSION = 1
+LOCAL_TZ = ZoneInfo("Asia/Shanghai")  # UTC+8, Feishu server time
+
+
+@dataclass
+class LastExportState:
+    """增量导出的状态信息"""
+    version: int = 1
+    chat_id: str = ""
+    exported_at: str = ""           # ISO 8601
+    timezone: str = "Asia/Shanghai"
+    last_message_time: str = ""      # YYYY-MM-DD HH:MM (from create_time)
+    total_messages: int = 0
+    message_ids: list[str] = field(default_factory=list)
+    last_page_token: Optional[str] = None
+
+
+@dataclass
+class MergeResult:
+    """合并结果统计"""
+    added: int = 0
+    updated: int = 0
+    deleted: int = 0
+    total: int = 0
+
+
+class ExportMode(Enum):
+    FULL = "full"
+    INCREMENTAL = "incremental"
+
+
+def local_time_to_iso8601(local_time_str: str) -> str:
+    """Convert 'YYYY-MM-DD HH:MM' (UTC+8) to ISO 8601.
+    Example: '2026-04-09 20:39' -> '2026-04-09T20:39:00+08:00'
+    """
+    if not local_time_str:
+        return ""
+    dt = datetime.strptime(local_time_str, "%Y-%m-%d %H:%M")
+    dt = dt.replace(tzinfo=LOCAL_TZ)
+    return dt.isoformat()
+
+
+def load_state(state_file: Path) -> Optional[LastExportState]:
+    """读取上次导出状态，返回 None 表示无效或不存在"""
+    if not state_file.exists():
+        return None
+    try:
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        return LastExportState(**data)
+    except (json.JSONDecodeError, TypeError, ValueError) as e:
+        print(f"警告: 状态文件无效 ({e})，将执行完整导出")
+        if state_file.exists():
+            state_file.rename(state_file.with_suffix(".bak"))
+        return None
+
+
+def save_state(state_file: Path, state: LastExportState) -> None:
+    """保存导出状态"""
+    state_file.write_text(json.dumps(asdict(state), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def save_checkpoint(output_dir: Path, page_token: str, page_num: int) -> None:
+    """保存断点续传信息"""
+    backup_file = output_dir / BACKUP_FILE
+    data = {
+        "created_at": datetime.now(LOCAL_TZ).isoformat(),
+        "last_page_token": page_token,
+        "last_successful_page": page_num
+    }
+    backup_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def load_checkpoint(output_dir: Path) -> tuple[Optional[str], int]:
+    """加载断点信息，返回 (page_token, page_num)"""
+    backup_file = output_dir / BACKUP_FILE
+    if not backup_file.exists():
+        return None, 0
+    try:
+        data = json.loads(backup_file.read_text(encoding="utf-8"))
+        return data.get("last_page_token"), data.get("last_successful_page", 0)
+    except json.JSONDecodeError:
+        return None, 0
+
+
+def detect_export_mode(output_dir: Path, args) -> ExportMode:
+    """自动检测导出模式"""
+    messages_file = output_dir / "messages.json"
+    state_file = output_dir / STATE_FILE
+
+    if getattr(args, 'full', False):
+        return ExportMode.FULL
+    if getattr(args, 'incremental', False):
+        return ExportMode.INCREMENTAL
+    # Auto-detect: if state exists, use incremental
+    if messages_file.exists() and state_file.exists():
+        return ExportMode.INCREMENTAL
+    return ExportMode.FULL
+
+
+def merge_messages(existing: list, new: list) -> tuple[list, MergeResult]:
+    """合并新旧消息，按 message_id 去重/更新/删除，按 create_time 排序"""
+    emap = {msg["message_id"]: msg for msg in existing}
+    result = MergeResult()
+
+    for msg in new:
+        msg_id = msg["message_id"]
+        if msg.get("deleted"):
+            if msg_id in emap:
+                del emap[msg_id]
+                result.deleted += 1
+            continue
+        if msg_id in emap:
+            if msg.get("updated"):
+                emap[msg_id] = msg
+                result.updated += 1
+        else:
+            emap[msg_id] = msg
+            result.added += 1
+
+    merged = sorted(emap.values(), key=lambda m: m.get("create_time", ""))
+    result.total = len(merged)
+    return merged, result
+
 
 def check_dependencies():
     """检查必要的依赖工具"""
@@ -40,7 +172,8 @@ def check_dependencies():
     return True
 
 
-def fetch_messages(chat_id: str, user_id: str, output_dir: Path, output_file: Path) -> int:
+def fetch_messages(chat_id: str, user_id: str, output_dir: Path, output_file: Path,
+                  start_time: str | None = None) -> int:
     """通过lark-cli获取消息并保存到messages.json，返回消息总数"""
     is_p2p = bool(user_id)
     all_messages = []
@@ -60,6 +193,9 @@ def fetch_messages(chat_id: str, user_id: str, output_dir: Path, output_file: Pa
             cmd.extend(["--user-id", user_id])
         else:
             cmd.extend(["--chat-id", chat_id])
+
+        if start_time:
+            cmd.extend(["--start", start_time])
 
         if page_token:
             cmd.extend(["--page-token", page_token])
@@ -97,6 +233,70 @@ def fetch_messages(chat_id: str, user_id: str, output_dir: Path, output_file: Pa
 
     print(f"消息获取完成: {len(all_messages)} 条，保存至 {output_file}")
     return len(all_messages)
+
+
+def fetch_messages_incremental(
+    chat_id: str,
+    user_id: str | None,
+    start_time: str,
+    page_token: str | None,
+    output_dir: Path
+) -> list[dict]:
+    """带断点续传的增量消息获取，返回消息列表（不写入文件）"""
+    all_messages = []
+    is_p2p = bool(user_id)
+    current_token = page_token
+    page_num = 0
+
+    print(f"增量获取消息 (从 {start_time} 开始)...")
+
+    while True:
+        page_num += 1
+        cmd = [
+            "lark-cli", "im", "+chat-messages-list",
+            "--sort", "asc",
+            "--page-size", "50",
+            "--format", "json",
+            "--start", start_time
+        ]
+        if is_p2p:
+            cmd.extend(["--user-id", user_id])
+        else:
+            cmd.extend(["--chat-id", chat_id])
+
+        if current_token:
+            cmd.extend(["--page-token", current_token])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            print(f"获取消息失败 (page {page_num}): {result.stderr[:100]}")
+            break
+
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            break
+
+        msgs = data.get("data", {}).get("messages", [])
+        has_more = data.get("data", {}).get("has_more", False)
+        page_token = data.get("data", {}).get("page_token", "") or ""
+
+        if not msgs:
+            break
+
+        all_messages.extend(msgs)
+        print(f"  第 {page_num} 页: {len(msgs)} 条 (累计: {len(all_messages)})")
+
+        # 断点保存
+        save_checkpoint(output_dir, page_token, page_num)
+
+        if not has_more or not page_token:
+            break
+        current_token = page_token
+
+    # 成功完成，删除断点文件
+    (output_dir / BACKUP_FILE).unlink(missing_ok=True)
+    return all_messages
 
 
 def download_resource(msg_id: str, file_key: str, file_type: str, dest_path: Path, export_dir: Path) -> bool:
@@ -490,6 +690,15 @@ def main():
     parser.add_argument("--output", dest="output", default=".", help="输出目录 (默认当前目录)")
     parser.add_argument("--workers", dest="workers", type=int, default=16, help="并发下载线程数 (默认16)")
     parser.add_argument("--fetch", dest="fetch", action="store_true", help="自动获取消息（无需手动准备messages.json）")
+    # 增量导出参数
+    parser.add_argument("--incremental", dest="incremental", action="store_true",
+                        help="增量导出：仅获取自上次导出后的新消息")
+    parser.add_argument("--full", dest="full", action="store_true",
+                        help="强制完整导出（忽略已有状态）")
+    parser.add_argument("--since", dest="since", type=str, default=None,
+                        help="增量起始时间 (ISO 8601 或 'YYYY-MM-DD HH:MM', 默认使用上次导出时间)")
+    parser.add_argument("--timezone", dest="timezone", default="Asia/Shanghai",
+                        help="时区 (IANA格式, 默认 Asia/Shanghai)")
     args = parser.parse_args()
 
     if not args.chat_id and not args.user_id:
@@ -511,18 +720,92 @@ def main():
     files_dir.mkdir(exist_ok=True, parents=True)
 
     messages_file = output_dir / "messages.json"
-    if not messages_file.exists():
-        if args.fetch:
+
+    # 读取已有消息
+    existing_messages = []
+    if messages_file.exists():
+        with open(messages_file, encoding="utf-8") as f:
+            existing_messages = json.load(f)
+
+    # 决定导出模式
+    export_mode = detect_export_mode(output_dir, args)
+    messages = []
+
+    if args.fetch:
+        if export_mode == ExportMode.INCREMENTAL:
+            # 增量导出模式
+            state = load_state(output_dir / STATE_FILE)
+
+            # 如果是增量模式但缺少 state 文件，从现有 messages.json 创建基线
+            if state is None and messages_file.exists():
+                print("检测到已有 messages.json，创建增量基线...")
+                ids = [msg["message_id"] for msg in existing_messages]
+                last_time = max((msg["create_time"] for msg in existing_messages), default="")
+                state = LastExportState(
+                    version=CURRENT_VERSION,
+                    chat_id=chat_id,
+                    exported_at=datetime.now(LOCAL_TZ).isoformat(),
+                    timezone=args.timezone,
+                    last_message_time=last_time,
+                    total_messages=len(existing_messages),
+                    message_ids=ids,
+                    last_page_token=None
+                )
+                save_state(output_dir / STATE_FILE, state)
+                print(f"基线创建完成: {len(existing_messages)} 条消息")
+
+            # 确定 start_time
+            start_time = None
+            if getattr(args, 'since', None):
+                since_val = getattr(args, 'since', None)
+                if since_val:
+                    if "T" in since_val:
+                        start_time = since_val
+                    else:
+                        start_time = local_time_to_iso8601(since_val)
+            elif state:
+                start_time = local_time_to_iso8601(state.last_message_time)
+
+            # 检查断点续传
+            resume_token, resume_page = load_checkpoint(output_dir)
+            if resume_token:
+                print(f"检测到中断的增量导出，从第 {resume_page} 页继续...")
+
+            # 增量 fetch
+            new_messages = fetch_messages_incremental(
+                chat_id, args.user_id,
+                start_time or "1970-01-01T00:00:00+08:00",
+                resume_token, output_dir
+            )
+
+            if new_messages and existing_messages:
+                merged, merge_result = merge_messages(existing_messages, new_messages)
+                print(f"合并: +{merge_result.added} 新, ~{merge_result.updated} 更新, "
+                      f"-{merge_result.deleted} 删除, 共 {merge_result.total} 条")
+                messages = merged
+                with open(messages_file, "w", encoding="utf-8") as f:
+                    json.dump(merged, f, ensure_ascii=False, indent=2)
+            elif new_messages:
+                messages = new_messages
+                with open(messages_file, "w", encoding="utf-8") as f:
+                    json.dump(new_messages, f, ensure_ascii=False, indent=2)
+            else:
+                print("无新消息")
+                messages = existing_messages
+        else:
+            # 完整导出模式
             fetched = fetch_messages(chat_id, args.user_id, output_dir, messages_file)
             if fetched == 0:
                 print("错误: 无法获取消息，请检查 ID 是否正确或 lark-cli 授权状态")
                 return 1
-        else:
-            print(f"错误: 找不到 messages.json，请使用 --fetch 自动获取，或先运行 lark-cli im +chat-messages-list 获取消息数据")
+            with open(messages_file, encoding="utf-8") as f:
+                messages = json.load(f)
+    else:
+        # 不获取，只处理已有
+        if not existing_messages:
+            print(f"错误: 找不到 messages.json，请使用 --fetch 自动获取")
             return 1
-
-    with open(messages_file, encoding="utf-8") as f:
-        messages = json.load(f)
+        messages = existing_messages
 
     print("=" * 50)
     print("飞书聊天记录导出")
@@ -649,6 +932,22 @@ def main():
     print(f"下载失败: {total_failed}")
     print(f"文件嵌入: {embedded_count}")
     print(f"{'='*50}")
+
+    # 增量模式：更新 state 文件
+    if export_mode == ExportMode.INCREMENTAL and messages:
+        new_state = LastExportState(
+            version=CURRENT_VERSION,
+            chat_id=chat_id,
+            exported_at=datetime.now(LOCAL_TZ).isoformat(),
+            timezone=args.timezone,
+            last_message_time=messages[-1].get("create_time", "") if messages else "",
+            total_messages=len(messages),
+            message_ids=[msg["message_id"] for msg in messages],
+            last_page_token=None
+        )
+        save_state(output_dir / STATE_FILE, new_state)
+        print(f"状态已更新: {STATE_FILE}")
+
     return 0
 
 

@@ -62,6 +62,36 @@ python3 scripts/export.py --chat-id <id> --output <dir> --workers 16 --fetch
 - `--workers <n>` — 并发下载线程数（默认 16），网络好时可设 32
 - `--fetch` — 自动获取消息（推荐使用，无需手动准备 messages.json）
 
+### 增量导出
+
+当群聊持续有新消息时，可使用增量模式仅获取自上次导出后的新消息：
+
+```bash
+# 自动检测（有 last_export.json 则增量，无则完整）
+python3 scripts/export.py --chat-id <id> --output <dir> --fetch
+
+# 强制增量模式
+python3 scripts/export.py --chat-id <id> --output <dir> --incremental --fetch
+
+# 强制完整导出
+python3 scripts/export.py --chat-id <id> --output <dir> --full --fetch
+
+# 指定起始时间
+python3 scripts/export.py --chat-id <id> --output <dir> --since "2026-04-01" --fetch
+```
+
+**注意**：
+- 首次使用增量模式前，必须先执行一次完整导出（或已有 messages.json）
+- 增量模式会自动在 output 目录下创建 `last_export.json` 状态文件
+- 支持断点续传：如果导出中断，重新运行会自动从中断处继续
+
+**新增参数：**
+
+- `--incremental` — 强制增量模式（无 state 时警告并降级为完整）
+- `--full` — 强制完整导出（忽略已有 state）
+- `--since` — 增量起始时间（ISO 8601 或 `YYYY-MM-DD HH:MM`，默认使用上次导出时间）
+- `--timezone` — 时区（IANA 格式，默认 `Asia/Shanghai`）
+
 ### 步骤 4：查看报告
 
 导出完成后，在指定输出目录下生成以下文件：
@@ -85,6 +115,7 @@ python3 scripts/export.py --chat-id <id> --output <dir> --workers 16 --fetch
 | 文件/目录 | 说明 |
 |---|---|
 | `report_with_images.html` | 主报告文件，仿飞书样式渲染，内嵌图片/音视频/PDF（按大小限制），其余文件提供下载链接 |
+| `last_export.json` | 增量导出状态文件，记录上次导出时间和消息 ID |
 | `resources/images/` | 下载到本地的图片，HTML 中通过相对路径引用 |
 | `resources/files/` | 下载到本地的附件文件（文档、音视频等） |
 
