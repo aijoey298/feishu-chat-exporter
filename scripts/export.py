@@ -419,7 +419,6 @@ def format_content(content: str, resource_map: dict, subdir: Path) -> str:
         return f'<br><div class="loading-img">[图片未下载: {escape_html(key[:20])}...]</div><br>'
 
     content = re.sub(r'\[Image: (img_v3_[a-zA-Z0-9_-]+)\]', replace_image, content)
-    content = re.sub(r'(img_v3_[a-zA-Z0-9_-]+)', replace_image, content)
 
     # 处理 <file key="..." name="..."/> XML格式
     def replace_file_tag(match):

@@ -17,7 +17,10 @@ version: 0.1.0
 执行导出前，依次检查以下依赖是否就绪：
 
 1. **lark-cli** — 飞书命令行工具，必须已安装并完成授权。运行 `lark-cli auth status` 验证。
-2. **Python 3** — 导出脚本以 Python 编写，确保 `python3` 可用。
+2. **Python 3.10+** — 脚本使用 `str | None` 类型注解语法（联合类型），不支持 Python 3.9。macOS 系统默认 python3 为 3.9.6，需使用 Homebrew 版本（如 `/opt/homebrew/bin/python3.14`）：
+   ```bash
+   /opt/homebrew/bin/python3.14 scripts/export.py --chat-id <id> ...  # 不要用默认 python3
+   ```
 3. **jq** — JSON 解析工具，用于处理 lark-cli 返回的结构化数据。macOS 可通过 `brew install jq` 安装。
 
 任意一项缺失时，先参考 `docs/SETUP.md` 完成安装和配置，再继续后续步骤。
@@ -127,6 +130,9 @@ python3 scripts/export.py --chat-id <id> --output <dir> --since "2026-04-01" --f
 - **`docs/SETUP.md`** — lark-cli 安装、授权及环境配置详细指南；包含多平台安装命令、Device Code 授权流程和常见错误处理
 
 ## 常见问题
+
+**Q: 运行脚本报 `TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'`**
+→ 系统默认 `python3` 为 3.9.6，不支持 `str | None` 联合类型语法。改用 `/opt/homebrew/bin/python3.14` 运行脚本。
 
 **Q: 提示"找不到 messages.json"**
 → 使用 `--fetch` 参数让脚本自动获取消息，或确保 messages.json 已存在于输出目录中。

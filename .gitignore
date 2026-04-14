@@ -36,3 +36,4 @@ output/
 # Environment
 .env
 .env.local
+.hermes/
