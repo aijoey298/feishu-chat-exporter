@@ -30,6 +30,7 @@ from zoneinfo import ZoneInfo
 MINIMAX_API_HOST = os.environ.get("MINIMAX_API_HOST", "https://api.minimaxi.com")
 MINIMAX_MODEL = "MiniMax-M2.7"
 AI_SUMMARY_FILE = "ai_summary.json"
+MAX_CONTEXT_CHARS = 400000  # MiniMax-M2.7 安全上下文字符上限（实测 400K 内稳定）
 
 
 # 文件大小限制（字节）
@@ -565,6 +566,16 @@ def generate_html(
             msg_lines.append(f"[{ct}] {sender}: {content}")
         msg_text = "\n".join(msg_lines)
 
+        # 如果消息文本过长，从头尾各取一半（保留近期和早期上下文）
+        if len(msg_text) > MAX_CONTEXT_CHARS:
+            half = MAX_CONTEXT_CHARS // 2
+            omitted = len(msg_text) - MAX_CONTEXT_CHARS
+            msg_text = (
+                msg_text[:half]
+                + f"\n\n[... 约 {omitted} 字符的消息已省略 ...]\n\n"
+                + msg_text[-half:]
+            )
+
         parts = [
             "你是一个飞书聊天记录问答助手。基于以下全部聊天记录回答用户问题。",
             "如果用户问到图片相关的问题，请结合图片描述回答。",
@@ -697,7 +708,7 @@ function toggleAiSummary() {{
   </div>
 </div>
 <script>
-var __CHAT_CONTEXT__ = {json.dumps(context_str, ensure_ascii=False)};
+var __CHAT_CONTEXT__ = {context_str};
 function toggleChatPanel() {{
   var body = document.getElementById('chatBody');
   var toggle = document.getElementById('chatToggle');
@@ -779,6 +790,8 @@ document.addEventListener('DOMContentLoaded', function() {{
 </body>
 </html>"""
     messages_html = [message_to_html(msg, resource_map, subdir) for msg in messages]
+    # 计算 context 的 JSON 形式（供 HTML JS 使用）
+    context_str_js = json.dumps(context_str, ensure_ascii=False)
     return HTML_TEMPLATE.format(
         chat_name=escape_html(chat_name),
         chat_id=escape_html(chat_id),
@@ -789,6 +802,7 @@ document.addEventListener('DOMContentLoaded', function() {{
         export_time=time.strftime("%Y-%m-%d %H:%M:%S"),
         messages="\n".join(messages_html),
         ai_summary_html=ai_summary_html,
+        context_str=context_str_js,
     )
 
 
@@ -894,24 +908,7 @@ def _get_minimax_key() -> str:
     key = os.environ.get("MINIMAX_API_KEY", "")
     if key:
         return key
-    # fallback: 从 crayon-shinchan config.js 读取
-    cfgs = [
-        Path.home() / "openclaw/lume/workspace/漫画生成/crayon-shinchan/config.js",
-        Path.home() / "openclaw/lume/workspace/漫画生成/crayon-shinchan/config.js",
-    ]
-    for cfg_path in [
-        Path.home() / "openclaw/lume/workspace/漫画生成/crayon-shinchan/config.js",
-        Path(__file__).parent.parent / "漫画生成/crayon-shinchan/config.js",
-    ]:
-        try:
-            if cfg_path.exists():
-                text = cfg_path.read_text()
-                m = re.search(r"apiKey:\s*'([^']+)'", text)
-                if m:
-                    return m.group(1)
-        except Exception:
-            pass
-    return ""
+    return _load_key_from_config()
 
 
 def _call_minimax_chat(prompt: str, api_key: str, retry: int = 3) -> Optional[str]:

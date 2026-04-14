@@ -86,10 +86,13 @@ def format_context_messages(messages: list) -> str:
     return "\n".join(lines)
 
 
+MAX_CONTEXT_CHARS = 400000  # MiniMax-M2.7 安全上下文字符上限（实测 400K 内稳定）
+
+
 def build_full_context(question: str, messages: list, ai_summary: str = "",
                        ai_image_index: dict = None) -> str:
     """
-    构建包含全部聊天记录的完整上下文字符串。
+    构建包含聊天记录的完整上下文字符串（带截断保护）。
     末尾包含 {question} 占位符，由 proxy.py 替换为实际问题。
     """
     # 格式化所有消息
@@ -101,6 +104,16 @@ def build_full_context(question: str, messages: list, ai_summary: str = "",
         msg_lines.append(f"[{ct}] {sender}: {content}")
 
     msg_text = "\n".join(msg_lines)
+
+    # 如果消息文本过长，从头尾各取一半（保留近期和早期上下文）
+    if len(msg_text) > MAX_CONTEXT_CHARS:
+        half = MAX_CONTEXT_CHARS // 2
+        omitted = len(msg_text) - MAX_CONTEXT_CHARS
+        msg_text = (
+            msg_text[:half]
+            + f"\n\n[... 约 {omitted} 字符的消息已省略 ...]\n\n"
+            + msg_text[-half:]
+        )
 
     parts = [
         "你是一个飞书聊天记录问答助手。基于以下全部聊天记录回答用户问题。",
