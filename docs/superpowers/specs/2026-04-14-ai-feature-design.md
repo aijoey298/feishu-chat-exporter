@@ -82,9 +82,11 @@
 
 ### API 调用
 
-**端点**：`POST https://api.minimax.io/v1/text/chatcompletion_v2`
+**端点**：`POST https://api.minimaxi.com/v1/chat/completions`
 
-**认证**：`Authorization: Bearer ${MINIMAX_API_KEY}`，GroupID 从环境变量 `MINIMAX_GROUP_ID` 读取。
+**认证**：`Authorization: Bearer ${MINIMAX_API_KEY}`（Token Plan key，格式 `sk-cp-xxx`，来自 `MINIMAX_API_KEY` 环境变量）。
+
+**Base URL 来源**：参考同设备 `crayon-shinchan` 项目配置，Base URL 为 `https://api.minimaxi.com`（与 `platform.minimax.io` 等效）。
 
 **消息分块策略**：
 - MiniMax 单次请求有 token 上限（模型 `MiniMax-Text-01`）
@@ -127,7 +129,7 @@
 {
   "chat_id": "oc_xxx",
   "generated_at": "2026-04-14T20:00:00+08:00",
-  "model": "MiniMax-Image-01",
+  "model": "MiniMax-Text-01 (vision via chat completions)",
   "images": [
     {
       "key": "img_v3_02mn_xxx",
@@ -144,17 +146,35 @@
 
 ### API 调用
 
-**端点**：`POST https://api.minimax.io/v1/images/understand`
+**端点**：`POST https://api.minimaxi.com/v1/chat/completions`
 
 **认证**：同文字摘要。
 
+**调用方式**：通过 Chat Completions API 传图，content 中使用 `[Image base64:{img_base64}]` 语法。
+
+```python
+import base64, requests
+
+with open(img_path, "rb") as f:
+    img_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+resp = requests.post(
+    "https://api.minimaxi.com/v1/chat/completions",
+    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+    json={
+        "model": "MiniMax-Text-01",
+        "messages": [
+            {"role": "user", "content": f'请描述这张图片，用中文回答并给出5个关键词标签。回答格式：\n描述：...\n标签：tag1,tag2,tag3,tag4,tag5\n[Image base64:{img_b64}]'}
+        ]
+    }
+)
+```
+
 **批次处理**：
-- 每张图片单独调用一次 API（多图不支持批量）
-- API 请求体：`{"model": "MiniMax-Image-01", "inputs": [{"image_url": "file:///path/to/img.jpg"}]}`
-- 也支持传入图片路径（file:// 或绝对路径）
+- 每张图片单独调用一次 API
 - 每次生成描述 + 5 个标签
 - 进度实时输出：`[3/1537] 处理中: img_v3_02mn_xxx.jpg`
-- 限速处理同上（429 退避重试）
+- 限速处理（429 退避重试，最多 3 次）
 
 ### 持久化
 
@@ -209,6 +229,7 @@ localhost:8765/health
 python3 scripts/proxy.py
 # 默认端口 8765
 # API key 从环境变量 MINIMAX_API_KEY 读取
+# MiniMax API Host: https://api.minimaxi.com（与 crayon-shinchan 项目一致）
 ```
 
 ### RAG 问答流程（CLI 工具 `ask.py`）
@@ -269,14 +290,14 @@ messages.json
      ├──→ export.py ──→ generate_html() ──→ report_with_images.html
      │                                    (含 AI 摘要 + 对话面板 JS)
      │
-     ├──→ export.py + MiniMax API ──→ ai_summary.json
+     ├──→ export.py + MiniMax API (直接调用) ──→ ai_summary.json
      │
-     ├──→ export.py + MiniMax API ──→ ai_image_index.json
+     ├──→ export.py + MiniMax API (直接调用) ──→ ai_image_index.json
      │
-     └──→ ask.py + MiniMax API ──→ 用户回答
+     └──→ ask.py + MiniMax API (经 proxy.py) ──→ 用户回答
               ↑
               │
-         (HTML 面板 JS)
+         (HTML 面板 JS → proxy.py)
 ```
 
 ---
@@ -286,7 +307,7 @@ messages.json
 | 依赖 | 用途 | 安装方式 |
 |------|------|---------|
 | `requests` | MiniMax API HTTP 调用 | pip |
-| MiniMax API key | 认证 | 环境变量 `MINIMAX_API_KEY`（GroupID: `MINIMAX_GROUP_ID`） |
+| MiniMax API key | 认证 | 环境变量 `MINIMAX_API_KEY`（Token Plan key，格式 `sk-cp-xxx`，参考同设备 `crayon-shinchan` 项目配置） |
 | lark-cli | 消息获取（已有） | 已有 |
 | Python 内置 `re`, `json`, `http.server` | 关键词检索、RAG、本地代理 | Python 3.14 标准库 |
 
@@ -299,22 +320,26 @@ messages.json
 - HTML 中的 JS 只和 `localhost:8765` 通信，不会泄露 key
 - 聊天记录和理解结果全部存在本地，不经过第三方服务器
 - 启动时检查 `MINIMAX_API_KEY` 环境变量，不存在则报错退出
+- API host 使用 `https://api.minimaxi.com`（与 `crayon-shinchan` 项目一致，Token Plan key 直接支持）
 
 ---
 
 ## 实施顺序
 
-1. **第一阶段**：`proxy.py`（基础）+ 文字摘要
-   - 先实现 proxy.py 作为基础设施
-   - 再实现 AI 文字摘要（经 proxy 调用 MiniMax）
-   - 文字摘要是第一个可测试的完整功能
+> **重要更新**：Token Plan key 可直接调用 MiniMax REST API（`https://api.minimaxi.com`），无需 MCP 或 Claude Code。`export.py` 可直接持有 key 调用 API，不依赖 proxy.py。
 
-2. **第二阶段**：`ask.py` CLI 问答 + HTML 对话面板
-   - CLI 工具优先（离线，不依赖 proxy 运行状态）
-   - proxy.py 支持 streaming 后，HTML 面板接入
+1. **第一阶段**：文字摘要（`export.py` 直调 API）+ `ai_summary.json`
+   - `export.py` 直接持有 `MINIMAX_API_KEY` 环境变量，调用 `POST /v1/chat/completions`
+   - 生成 `results/ai_summary.json`，嵌入 HTML
+   - 最简可测试单元，无需 proxy
 
-3. **第三阶段**：图片理解 + RAG 搜索增强
-   - 图片理解作为独立步骤（`--ai-images`）
-   - RAG 检索增强（图片 + 文字联合搜索）
+2. **第二阶段**：`proxy.py` + HTML 对话面板
+   - proxy.py 持有 key，提供 `/ask` 流式端点
+   - HTML 面板 JS → proxy.py → MiniMax API
+   - `ask.py` CLI 工具同步完成
+
+3. **第三阶段**：图片理解（`--ai-images`）+ RAG 搜索
+   - export.py 同样直调 API，逐图理解，生成 `ai_image_index.json`
+   - RAG 检索增强（关键词 + 图片 tags 联合搜索）
 
 每个阶段独立可测试，第一阶段完成后即可使用 AI 摘要功能。
