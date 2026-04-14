@@ -4,9 +4,11 @@
 import http.server
 import json
 import os
+import re
 import urllib.request
 import time
 import argparse
+from pathlib import Path
 
 API_HOST = "https://api.minimaxi.com"
 MODEL = "MiniMax-M2.7"
@@ -15,12 +17,35 @@ RETRY_MAX = 3
 RETRY_BASE_SLEEP = 5
 
 
-def require_api_key():
-    api_key = os.environ.get("MINIMAX_API_KEY")
-    if not api_key:
-        print("错误: MINIMAX_API_KEY 环境变量未设置")
-        exit(1)
-    return api_key
+_api_key = None
+
+def _load_key_from_config():
+    """从 crayon-shinchan config.js 读取 API Key 作为 fallback"""
+    import re
+    from pathlib import Path
+    for cfg_path in [
+        Path.home() / "openclaw/lume/workspace/漫画生成/crayon-shinchan/config.js",
+    ]:
+        try:
+            if cfg_path.exists():
+                text = cfg_path.read_text()
+                m = re.search(r"apiKey:\s*'([^']+)'", text)
+                if m:
+                    return m.group(1)
+        except Exception:
+            pass
+    return ""
+
+def get_api_key():
+    global _api_key
+    if _api_key is None:
+        _api_key = os.environ.get("MINIMAX_API_KEY", "")
+        if not _api_key:
+            _api_key = _load_key_from_config()
+        if not _api_key:
+            print("错误: MINIMAX_API_KEY 环境变量未设置")
+            return None
+    return _api_key
 
 
 def chat_completion(messages, api_key):
@@ -41,8 +66,7 @@ def chat_completion(messages, api_key):
         method="POST",
     )
 
-    with urllib.request.urlopen(req) as resp:
-        return resp
+    return urllib.request.urlopen(req)
 
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
@@ -90,9 +114,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 messages.append({"role": "assistant", "content": h.get("content", "")})
         messages.append({"role": "user", "content": question})
 
+        api_key = get_api_key()
+        if not api_key:
+            self.send_json({"error": "MINIMAX_API_KEY not set"}, 500)
+            return
+
         for attempt in range(1, RETRY_MAX + 1):
             try:
-                resp = chat_completion(messages, require_api_key())
+                resp = chat_completion(messages, api_key)
                 break
             except urllib.error.HTTPError as e:
                 if e.code in (429, 529) and attempt < RETRY_MAX:
@@ -114,20 +143,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
 
-        for chunk in resp:
-            if not chunk:
+        for raw in resp:
+            if not raw:
                 continue
-            line = chunk.decode("utf-8", errors="replace").strip()
-            if not line:
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line or not line.startswith("data: "):
                 continue
 
-            # MiniMax stream chunk: {"id":"...","choices":[...]}
+            # MiniMax SSE chunk: "data: {...}"
             try:
-                data = json.loads(line)
+                data = json.loads(line[6:])  # strip "data: " prefix
                 choices = data.get("choices", [{}])
                 delta = choices[0].get("delta", {})
                 content = delta.get("content", "")
-                if content is not None:
+                if content:
                     sse = json.dumps({"content": content, "done": False})
                     self.wfile.write(f"data: {sse}\n\n".encode("utf-8"))
             except json.JSONDecodeError:
@@ -138,6 +167,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
 
 def run(port):
+    if not get_api_key():
+        print("错误: MINIMAX_API_KEY 环境变量未设置，请在启动前设置该环境变量")
+        exit(1)
     server = http.server.HTTPServer(("0.0.0.0", port), ProxyHandler)
     print(f"[proxy] listening on http://0.0.0.0:{port}")
     server.serve_forever()

@@ -174,14 +174,25 @@ def main():
         print(f"错误: API 返回错误状态码 {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
         return 1
 
-    # 流式读取响应
+    # 流式读取响应（解析 SSE 格式）
     print("回答：", end="", flush=True)
     answer_parts = []
-    for chunk in resp.iter_content(chunk_size=None):
-        if chunk:
-            text = chunk.decode("utf-8", errors="replace")
-            print(text, end="", flush=True)
-            answer_parts.append(text)
+    for line in resp.iter_lines():
+        if not line:
+            continue
+        text = line.decode("utf-8", errors="replace").strip()
+        if not text.startswith("data: "):
+            continue
+        try:
+            data = json.loads(text[6:])
+            content = data.get("content", "")
+            if content:
+                print(content, end="", flush=True)
+                answer_parts.append(content)
+            if data.get("done"):
+                break
+        except json.JSONDecodeError:
+            pass
     print()
 
     # 打印参考消息
