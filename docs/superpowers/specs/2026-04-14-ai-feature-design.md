@@ -82,14 +82,16 @@
 
 ### API 调用
 
-**端点**：`POST https://api.minimaxi.com/v1/chat/completions`
+**端点**：`POST https://api.minimaxi.com/v1/text/chatcompletion_v2`
 
 **认证**：`Authorization: Bearer ${MINIMAX_API_KEY}`（Token Plan key，格式 `sk-cp-xxx`，来自 `MINIMAX_API_KEY` 环境变量）。
 
 **Base URL 来源**：参考同设备 `crayon-shinchan` 项目配置，Base URL 为 `https://api.minimaxi.com`（与 `platform.minimax.io` 等效）。
 
+**模型**：`MiniMax-M2.7`（Token Plan 支持的模型，MiniMax-Text-01 不支持 Token Plan）
+
 **消息分块策略**：
-- MiniMax 单次请求有 token 上限（模型 `MiniMax-Text-01`）
+- MiniMax 单次请求有 token 上限
 - 将 messages.json 按时间分段，每段不超过 200 条消息
 - 摘要 prompt 包含"你是一个聊天记录分析助手"的角色设定
 - 循环调用 API 聚合多段结果，最终合并为单一结构化摘要
@@ -129,7 +131,7 @@
 {
   "chat_id": "oc_xxx",
   "generated_at": "2026-04-14T20:00:00+08:00",
-  "model": "MiniMax-Text-01 (vision via chat completions)",
+  "model": "MiniMax-M2.7 (vision via chat completions)",
   "images": [
     {
       "key": "img_v3_02mn_xxx",
@@ -146,9 +148,11 @@
 
 ### API 调用
 
-**端点**：`POST https://api.minimaxi.com/v1/chat/completions`
+**端点**：`POST https://api.minimaxi.com/v1/text/chatcompletion_v2`
 
 **认证**：同文字摘要。
+
+**模型**：`MiniMax-M2.7`（支持 vision）
 
 **调用方式**：通过 Chat Completions API 传图，content 中使用 `[Image base64:{img_base64}]` 语法。
 
@@ -162,7 +166,7 @@ resp = requests.post(
     "https://api.minimaxi.com/v1/chat/completions",
     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
     json={
-        "model": "MiniMax-Text-01",
+        "model": "MiniMax-M2.7",
         "messages": [
             {"role": "user", "content": f'请描述这张图片，用中文回答并给出5个关键词标签。回答格式：\n描述：...\n标签：tag1,tag2,tag3,tag4,tag5\n[Image base64:{img_b64}]'}
         ]
@@ -328,18 +332,20 @@ messages.json
 
 > **重要更新**：Token Plan key 可直接调用 MiniMax REST API（`https://api.minimaxi.com`），无需 MCP 或 Claude Code。`export.py` 可直接持有 key 调用 API，不依赖 proxy.py。
 
-1. **第一阶段**：文字摘要（`export.py` 直调 API）+ `ai_summary.json`
-   - `export.py` 直接持有 `MINIMAX_API_KEY` 环境变量，调用 `POST /v1/chat/completions`
-   - 生成 `results/ai_summary.json`，嵌入 HTML
-   - 最简可测试单元，无需 proxy
+1. **第一阶段 [已完成]**：文字摘要（`export.py` 直调 API）+ `ai_summary.json`
+   - `export.py` 直接持有 `MINIMAX_API_KEY` 环境变量，调用 `POST /v1/text/chatcompletion_v2`
+   - 模型使用 `MiniMax-M2.7`（Token Plan 支持）
+   - 生成 `results/ai_summary.json`，嵌入 HTML `<div class="ai-summary">`（折叠展示）
+   - CLI 参数：`--ai-summary`（默认开启）、`--no-ai-summary`、`--force-ai`
+   - 摘要生成后自动保存在 `ai_summary.json`，下次导出跳过（除非 `--force-ai`）
 
-2. **第二阶段**：`proxy.py` + HTML 对话面板
-   - proxy.py 持有 key，提供 `/ask` 流式端点
-   - HTML 面板 JS → proxy.py → MiniMax API
-   - `ask.py` CLI 工具同步完成
+2. **第二阶段 [已完成]**：`proxy.py` + `ask.py` CLI 工具
+   - proxy.py 持有 key，提供 `/ask` 流式端点（`text/event-stream`）
+   - 端点：`GET /health`（健康检查）、`POST /ask`（流式问答）
+   - ask.py CLI 工具：关键词检索 + MiniMax API（经 proxy.py）
+   - 检索策略：Python 内置 `re` 模块，关键词匹配，加权排序，最多返回 10 条参考消息
 
-3. **第三阶段**：图片理解（`--ai-images`）+ RAG 搜索
+3. **第三阶段 [未开始]**：图片理解（`--ai-images`）+ HTML 对话面板
    - export.py 同样直调 API，逐图理解，生成 `ai_image_index.json`
+   - HTML 面板：JS → proxy.py → MiniMax API（流式显示）
    - RAG 检索增强（关键词 + 图片 tags 联合搜索）
-
-每个阶段独立可测试，第一阶段完成后即可使用 AI 摘要功能。

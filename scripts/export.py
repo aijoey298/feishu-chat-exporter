@@ -13,6 +13,8 @@ import subprocess
 import time
 import argparse
 import shutil
+import os
+import base64
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,6 +24,12 @@ from typing import Optional
 from datetime import datetime, timezone
 from enum import Enum
 from zoneinfo import ZoneInfo
+
+
+# MiniMax API 配置
+MINIMAX_API_HOST = os.environ.get("MINIMAX_API_HOST", "https://api.minimaxi.com")
+MINIMAX_MODEL = "MiniMax-M2.7"
+AI_SUMMARY_FILE = "ai_summary.json"
 
 
 # 文件大小限制（字节）
@@ -399,13 +407,22 @@ def format_content(content: str, resource_map: dict, subdir: Path) -> str:
     if not content:
         return ""
 
-    # 替换 [Image: img_v3_xxx] 和行内 img_v3_xxx
+    # 建立 key → 正确相对路径 的映射（解决 subdir.name 丢失子目录的问题）
+    _key_to_relpath = {}
+    for key, path in resource_map.items():
+        if path.exists():
+            if "images" in path.parts:
+                _key_to_relpath[key] = f"resources/images/{path.name}"
+            else:
+                _key_to_relpath[key] = f"resources/files/{path.name}"
+
+    # 替换 [Image: img_v3_xxx]
     def replace_image(match):
         key = match.group(1)
         path = resource_map.get(key)
         if path and path.exists():
             ext = path.suffix.lower()
-            rel = f"{subdir.name}/{path.name}"
+            rel = _key_to_relpath.get(key, f"resources/images/{path.name}")
             if ext in (".jpg", ".jpeg", ".png", ".gif"):
                 return f'<br><img src="{rel}" alt="图片" loading="lazy"><br>'
             elif ext in (".mp3", ".m4a", ".wav"):
@@ -439,7 +456,7 @@ def format_content(content: str, resource_map: dict, subdir: Path) -> str:
         path = resource_map.get(file_key)
         if path and path.exists():
             ext = path.suffix.lower()
-            rel = f"{subdir.name}/{path.name}"
+            rel = _key_to_relpath.get(file_key, f"resources/files/{path.name}")
             if ext in (".mp3", ".m4a", ".wav"):
                 return f'<br><audio controls src="{rel}"></audio>'
             elif ext in (".mp4", ".mov"):
@@ -464,7 +481,7 @@ def format_content(content: str, resource_map: dict, subdir: Path) -> str:
         if path and path.exists():
             ext = path.suffix.lower()
             if ext in (".jpg", ".jpeg", ".png", ".gif"):
-                rel = f"{subdir.name}/{path.name}"
+                rel = _key_to_relpath.get(key, f"resources/images/{path.name}")
                 return f'<br><img src="{rel}" alt="视频封面" loading="lazy">'
         return ""
 
@@ -515,7 +532,26 @@ def generate_html(
     downloaded_count: int,
     embedded_count: int,
     failed_count: int,
+    ai_summary: Optional[dict] = None,
 ) -> str:
+    # AI 摘要 HTML 片段
+    ai_summary_html = ""
+    if ai_summary and ai_summary.get("content"):
+        content = escape_html(ai_summary["content"]).replace("\n", "<br>")
+        generated_at = ai_summary.get("generated_at", "")[:19]
+        model = ai_summary.get("model", "")
+        ai_summary_html = f"""
+<div class="ai-summary">
+  <div class="ai-summary-header" onclick="toggleAiSummary()">
+    <span class="ai-summary-title">&#x1F4AC; AI 摘要</span>
+    <span class="ai-summary-meta">{generated_at} via {model}</span>
+    <span class="ai-summary-toggle" id="aiSummaryToggle">&#9660; 展开</span>
+  </div>
+  <div class="ai-summary-content" id="aiSummaryContent" style="display:none">
+    <div class="ai-summary-text">{content}</div>
+  </div>
+</div>"""
+
     HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
 <head>
@@ -555,7 +591,29 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC
 .file-missing {{ color: #999; font-size: 13px; }}
 .footer {{ text-align: center; color: #bbb; font-size: 12px; padding: 30px; }}
 .loading-img {{ background: #f0f0f0; border-radius: 8px; padding: 40px; text-align: center; color: #999; font-size: 13px; }}
+/* AI 摘要 */
+.ai-summary {{ background: #fff8e6; border: 1px solid #ffe58a; border-radius: 12px; margin-bottom: 16px; overflow: hidden; }}
+.ai-summary-header {{ display: flex; align-items: center; gap: 8px; padding: 12px 16px; cursor: pointer; user-select: none; }}
+.ai-summary-header:hover {{ background: #fff3cc; }}
+.ai-summary-title {{ font-weight: 600; color: #b37600; font-size: 14px; }}
+.ai-summary-meta {{ font-size: 11px; color: #999; margin-left: auto; }}
+.ai-summary-toggle {{ font-size: 12px; color: #b37600; }}
+.ai-summary-content {{ border-top: 1px solid #ffe58a; padding: 12px 16px; }}
+.ai-summary-text {{ font-size: 13px; line-height: 1.8; color: #555; }}
 </style>
+<script>
+function toggleAiSummary() {{
+  var content = document.getElementById('aiSummaryContent');
+  var toggle = document.getElementById('aiSummaryToggle');
+  if (content.style.display === 'none') {{
+    content.style.display = 'block';
+    toggle.textContent = '▲ 收起';
+  }} else {{
+    content.style.display = 'none';
+    toggle.textContent = '▼ 展开';
+  }}
+}}
+</script>
 </head>
 <body>
 <div class="header">
@@ -568,6 +626,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC
     <span>{export_time}</span>
   </div>
 </div>
+{ai_summary_html}
 <div class="container">
 {messages}
 </div>
@@ -586,6 +645,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC
         embedded_count=embedded_count,
         export_time=time.strftime("%Y-%m-%d %H:%M:%S"),
         messages="\n".join(messages_html),
+        ai_summary_html=ai_summary_html,
     )
 
 
@@ -682,6 +742,160 @@ def build_existing_map(res_dir: Path) -> dict:
     return mapping
 
 
+# ---------------------------------------------------------------------------
+# AI 摘要功能
+# ---------------------------------------------------------------------------
+
+def _get_minimax_key() -> str:
+    """从环境变量或 crayon-shinchan 项目读取 MiniMax API Key"""
+    key = os.environ.get("MINIMAX_API_KEY", "")
+    if key:
+        return key
+    # fallback: 从 crayon-shinchan config.js 读取
+    cfgs = [
+        Path.home() / "openclaw/lume/workspace/漫画生成/crayon-shinchan/config.js",
+        Path.home() / "openclaw/lume/workspace/漫画生成/crayon-shinchan/config.js",
+    ]
+    for cfg_path in [
+        Path.home() / "openclaw/lume/workspace/漫画生成/crayon-shinchan/config.js",
+        Path(__file__).parent.parent / "漫画生成/crayon-shinchan/config.js",
+    ]:
+        try:
+            if cfg_path.exists():
+                text = cfg_path.read_text()
+                m = re.search(r"apiKey:\s*'([^']+)'", text)
+                if m:
+                    return m.group(1)
+        except Exception:
+            pass
+    return ""
+
+
+def _call_minimax_chat(prompt: str, api_key: str, retry: int = 3) -> Optional[str]:
+    """调用 MiniMax Chat API，返回文本内容。失败返回 None。"""
+    try:
+        import requests as _requests
+    except ImportError:
+        print("警告: requests 库未安装，AI 摘要功能不可用")
+        return None
+
+    for attempt in range(retry):
+        try:
+            resp = _requests.post(
+                f"{MINIMAX_API_HOST}/v1/text/chatcompletion_v2",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": MINIMAX_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=60,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                choices = data.get("choices")
+                if choices and choices[0].get("message", {}).get("content"):
+                    return choices[0]["message"]["content"]
+                br = data.get("base_resp", {})
+                if br.get("status_code") != 0:
+                    print(f"  MiniMax API 错误 ({br.get('status_code')}): {br.get('status_msg', '')}")
+            elif resp.status_code == 529 or resp.status_code == 429:
+                print(f"  MiniMax 服务过载（第 {attempt+1} 次重试）...")
+                time.sleep(5 * (attempt + 1))
+                continue
+            else:
+                print(f"  MiniMax API 错误 {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            print(f"  MiniMax 请求异常: {e}")
+    return None
+
+
+def generate_ai_summary(messages: list, output_dir: Path, force: bool = False) -> Optional[dict]:
+    """
+    为聊天记录生成 AI 摘要。
+    成功返回摘要 dict，失败返回 None。
+    """
+    summary_file = output_dir / AI_SUMMARY_FILE
+
+    # 读取已有摘要
+    if summary_file.exists() and not force:
+        try:
+            data = json.loads(summary_file.read_text(encoding="utf-8"))
+            print(f"  已存在 AI 摘要（{summary_file}），跳过生成（用 --force-ai 强制重新生成）")
+            return data
+        except Exception:
+            pass
+
+    api_key = _get_minimax_key()
+    if not api_key:
+        print("警告: 未找到 MiniMax API Key，跳过 AI 摘要")
+        return None
+
+    # 提取消息文本
+    total = len(messages)
+    print(f"开始生成 AI 摘要（{total} 条消息）...")
+
+    # 分块：每块最多 300 条消息，避免超出 context window
+    chunks = []
+    for i in range(0, total, 300):
+        chunk_msgs = messages[i : i + 300]
+        texts = []
+        for msg in chunk_msgs:
+            sender = (msg.get("sender") or {}).get("name", "未知")
+            ct = msg.get("create_time", "")[:16]
+            content = msg.get("content", "")[:500]
+            if content:
+                texts.append(f"[{ct}] {sender}: {content}")
+        chunks.append("\n".join(texts))
+
+    # 逐块生成摘要，再合并
+    chunk_summaries = []
+    system_prompt = (
+        "你是一个聊天记录分析助手。请分析用户提供的聊天记录片段，生成一段结构化摘要。"
+        "回复格式为纯文本，包含：\n"
+        "1. 参与者列表（最多5人）和发言数量\n"
+        "2. 主要话题（最多3个）\n"
+        "3. 核心内容概述（50字以内）\n"
+        "不要添加额外说明，直接输出摘要内容。"
+    )
+
+    for idx, chunk_text in enumerate(chunks):
+        print(f"  处理第 {idx+1}/{len(chunks)} 个片段...")
+        prompt = f"{system_prompt}\n\n---聊天记录片段---\n{chunk_text[:3000]}"
+        result = _call_minimax_chat(prompt, api_key)
+        if result:
+            chunk_summaries.append(result.strip())
+        time.sleep(1)
+
+    if not chunk_summaries:
+        print("警告: 所有片段摘要均失败，跳过 AI 摘要")
+        return None
+
+    # 最终聚合摘要（如果有多块）
+    if len(chunk_summaries) == 1:
+        final = chunk_summaries[0]
+    else:
+        prefix = "下面是同一个聊天记录的多段摘要，请合并为一份简洁的最终摘要，包含：参与者列表、主要话题、核心概述（100字以内）。\n\n"
+        join_str = "\n---\n".join(f"[片段{i+1}]\n{s}" for i, s in enumerate(chunk_summaries))
+        merge_prompt = prefix + join_str
+        final = _call_minimax_chat(merge_prompt, api_key) or "\n".join(chunk_summaries)
+
+    summary_data = {
+        "chat_id": (messages[0].get("chat_id", "") if messages else ""),
+        "generated_at": datetime.now().isoformat(),
+        "model": MINIMAX_MODEL,
+        "total_messages": total,
+        "chunks": len(chunks),
+        "content": final,
+    }
+
+    summary_file.write_text(json.dumps(summary_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"  AI 摘要已保存: {summary_file}")
+    return summary_data
+
+
 def main():
     parser = argparse.ArgumentParser(description="飞书聊天记录导出工具")
     parser.add_argument("--chat-id", dest="chat_id", help="群聊ID (oc_xxx)")
@@ -698,6 +912,13 @@ def main():
                         help="增量起始时间 (ISO 8601 或 'YYYY-MM-DD HH:MM', 默认使用上次导出时间)")
     parser.add_argument("--timezone", dest="timezone", default="Asia/Shanghai",
                         help="时区 (IANA格式, 默认 Asia/Shanghai)")
+    # AI 功能参数
+    parser.add_argument("--ai-summary", dest="ai_summary", action="store_true", default=True,
+                        help="生成 AI 文字摘要（默认开启）")
+    parser.add_argument("--no-ai-summary", dest="ai_summary", action="store_false",
+                        help="关闭 AI 文字摘要")
+    parser.add_argument("--force-ai", dest="force_ai", action="store_true",
+                        help="强制重新生成 AI 结果（忽略缓存）")
     args = parser.parse_args()
 
     if not args.chat_id and not args.user_id:
@@ -894,6 +1115,15 @@ def main():
     resource_map = build_existing_map(res_dir)
     print(f"本地资源映射: {len(resource_map)} 个文件")
 
+    # AI 摘要生成
+    ai_summary_data = None
+    if getattr(args, 'ai_summary', True):
+        ai_summary_data = generate_ai_summary(
+            messages,
+            output_dir,
+            force=getattr(args, 'force_ai', False)
+        )
+
     # 统计嵌入数
     embedded_count = 0
     for key, path in resource_map.items():
@@ -917,6 +1147,7 @@ def main():
         downloaded_count=total_downloaded,
         embedded_count=embedded_count,
         failed_count=total_failed,
+        ai_summary=ai_summary_data,
     )
 
     output_html = output_dir / "report_with_images.html"
