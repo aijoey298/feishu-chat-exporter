@@ -533,6 +533,7 @@ def generate_html(
     embedded_count: int,
     failed_count: int,
     ai_summary: Optional[dict] = None,
+    ai_image_index: Optional[dict] = None,
 ) -> str:
     # AI 摘要 HTML 片段
     ai_summary_html = ""
@@ -600,6 +601,24 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC
 .ai-summary-toggle {{ font-size: 12px; color: #b37600; }}
 .ai-summary-content {{ border-top: 1px solid #ffe58a; padding: 12px 16px; }}
 .ai-summary-text {{ font-size: 13px; line-height: 1.8; color: #555; }}
+/* AI 对话面板 */
+.ai-chat-panel {{ position: fixed; bottom: 20px; right: 20px; width: 380px; background: white; border-radius: 16px; box-shadow: 0 4px 24px rgba(0,0,0,0.15); overflow: hidden; z-index: 1000; font-size: 14px; }}
+.chat-header {{ background: linear-gradient(135deg, #fe6803, #ff8533); color: white; padding: 12px 16px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; user-select: none; }}
+.chat-header:hover {{ background: linear-gradient(135deg, #e55a00, #e57500); }}
+.chat-body {{ border-top: 1px solid #eee; }}
+.chat-messages {{ height: 300px; overflow-y: auto; padding: 12px; background: #f9f9f9; }}
+.chat-message {{ margin-bottom: 10px; line-height: 1.6; }}
+.chat-message.user {{ color: #fe6803; font-weight: 600; }}
+.chat-message.assistant {{ color: #333; }}
+.chat-message.assistant:before {{ content: "AI: "; color: #999; }}
+.chat-message.error {{ color: #e55a00; font-size: 12px; }}
+.chat-empty {{ color: #999; text-align: center; padding-top: 80px; font-size: 13px; }}
+.chat-input-area {{ display: flex; gap: 8px; padding: 10px; border-top: 1px solid #eee; }}
+.chat-input-area input {{ flex: 1; padding: 8px 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; outline: none; }}
+.chat-input-area input:focus {{ border-color: #fe6803; }}
+.chat-input-area button {{ padding: 8px 16px; background: #fe6803; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 13px; }}
+.chat-input-area button:hover {{ background: #e55a00; }}
+.chat-input-area button:disabled {{ background: #ccc; cursor: not-allowed; }}
 </style>
 <script>
 function toggleAiSummary() {{
@@ -633,6 +652,99 @@ function toggleAiSummary() {{
 <div class="footer">
   由 Claude Code 自动生成
 </div>
+<!-- AI 对话面板 -->
+<div class="ai-chat-panel" id="aiChatPanel">
+  <div class="chat-header" onclick="toggleChatPanel()">
+    <span>&#x1F4AC; AI 问答</span>
+    <span class="chat-toggle" id="chatToggle">&#9660;</span>
+  </div>
+  <div class="chat-body" id="chatBody" style="display:none">
+    <div class="chat-messages" id="chatMessages"></div>
+    <div class="chat-input-area">
+      <input type="text" id="chatInput" placeholder="输入问题，按 Enter 发送..." onkeydown="handleChatKeydown(event)" />
+      <button onclick="sendChatMessage()">发送</button>
+    </div>
+  </div>
+</div>
+<script>
+function toggleChatPanel() {{
+  var body = document.getElementById('chatBody');
+  var toggle = document.getElementById('chatToggle');
+  if (body.style.display === 'none') {{
+    body.style.display = 'block';
+    toggle.innerHTML = '&#9660;';
+  }} else {{
+    body.style.display = 'none';
+    toggle.innerHTML = '&#9650;';
+  }}
+}}
+function sendChatMessage() {{
+  var input = document.getElementById('chatInput');
+  var question = input.value.trim();
+  if (!question) return;
+  var messagesDiv = document.getElementById('chatMessages');
+  var userDiv = document.createElement('div');
+  userDiv.className = 'chat-message user';
+  userDiv.textContent = question;
+  messagesDiv.appendChild(userDiv);
+  input.value = '';
+  messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  var btn = input.nextElementSibling;
+  btn.disabled = true;
+  input.disabled = true;
+  var assistantDiv = document.createElement('div');
+  assistantDiv.className = 'chat-message assistant';
+  assistantDiv.textContent = '';
+  messagesDiv.appendChild(assistantDiv);
+  fetch('http://localhost:8765/ask', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{question: question, history: []}})
+  }})
+  .then(function(resp) {{
+    var reader = resp.body.getReader();
+    var decoder = new TextDecoder();
+    function read() {{
+      reader.read().then(function(result) {{
+        if (result.done) {{
+          btn.disabled = false;
+          input.disabled = false;
+          return;
+        }}
+        var text = decoder.decode(result.value);
+        var lines = text.split('\n');
+        for (var i = 0; i < lines.length; i++) {{
+          var line = lines[i].trim();
+          if (line.startsWith('data: ')) {{
+            try {{
+              var data = JSON.parse(line.substring(6));
+              if (data.content) {{
+                assistantDiv.textContent += data.content;
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+              }}
+            }} catch (e) {{}}
+          }}
+        }}
+        read();
+      }});
+    }}
+    read();
+  }})
+  .catch(function(err) {{
+    assistantDiv.className = 'chat-message error';
+    assistantDiv.textContent = '错误: ' + err.message;
+    btn.disabled = false;
+    input.disabled = false;
+  }});
+}}
+function handleChatKeydown(e) {{
+  if (e.key === 'Enter') sendChatMessage();
+}}
+document.addEventListener('DOMContentLoaded', function() {{
+  var footer = document.querySelector('.footer');
+  if (footer) footer.style.paddingBottom = '20px';
+}});
+</script>
 </body>
 </html>"""
     messages_html = [message_to_html(msg, resource_map, subdir) for msg in messages]
@@ -896,6 +1008,176 @@ def generate_ai_summary(messages: list, output_dir: Path, force: bool = False) -
     return summary_data
 
 
+def _load_key_from_config():
+    """从 crayon-shinchan config.js 读取 API Key"""
+    import re
+    from pathlib import Path
+    for cfg_path in [
+        Path.home() / "openclaw/lume/workspace/漫画生成/crayon-shinchan/config.js",
+    ]:
+        try:
+            if cfg_path.exists():
+                text = cfg_path.read_text()
+                m = re.search(r"apiKey:\s*'([^']+)'", text)
+                if m:
+                    return m.group(1)
+        except Exception:
+            pass
+    return ""
+
+
+def _get_minimax_key() -> str:
+    """从环境变量或 crayon-shinchan 项目读取 MiniMax API Key"""
+    key = os.environ.get("MINIMAX_API_KEY", "")
+    if key:
+        return key
+    return _load_key_from_config()
+
+
+def _compress_image_for_api(img_path: Path, max_width=800) -> Optional[str]:
+    """压缩图片并返回 base64 编码，用于 API 调用"""
+    import io
+    try:
+        from PIL import Image
+    except ImportError:
+        print("警告: PIL 未安装，无法压缩图片，跳过该图片")
+        return None
+    try:
+        with Image.open(img_path) as img:
+            if img.width > max_width:
+                ratio = max_width / img.width
+                new_height = int(img.height * ratio)
+                img = img.resize((max_width, new_height), Image.LANCZOS)
+            buf = io.BytesIO()
+            img.convert("RGB").save(buf, "JPEG", quality=85)
+            return base64.b64encode(buf.getvalue()).decode("utf-8")
+    except Exception as e:
+        print(f"  图片压缩失败 {img_path.name}: {e}")
+        return None
+
+
+def generate_ai_image_index(messages: list, output_dir: Path, images_dir: Path, resource_map: dict, force: bool = False) -> Optional[dict]:
+    """
+    为所有已下载的图片生成 AI 理解索引。
+    成功返回索引 dict，失败返回 None。
+    """
+    import requests as _requests
+
+    index_file = output_dir / "ai_image_index.json"
+
+    # 读取已有索引
+    if index_file.exists() and not force:
+        try:
+            data = json.loads(index_file.read_text(encoding="utf-8"))
+            print(f"  已存在图片索引（{index_file}），跳过生成（用 --force-ai 强制重新生成）")
+            return data
+        except Exception:
+            pass
+
+    api_key = _get_minimax_key()
+    if not api_key:
+        print("警告: 未找到 MiniMax API Key，跳过图片理解")
+        return None
+
+    # 收集所有图片文件
+    image_files = []
+    for p in images_dir.iterdir():
+        if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png", ".gif"):
+            image_files.append(p)
+
+    if not image_files:
+        print("  未找到已下载的图片，跳过图片理解")
+        return None
+
+    print(f"开始生成图片理解索引（{len(image_files)} 张图片）...")
+
+    # 建立 key → (message_id, sender, create_time) 的映射
+    key_to_msg = {}
+    for msg in messages:
+        msg_id = msg.get("message_id", "")
+        sender = (msg.get("sender") or {}).get("name", "未知")
+        ct = msg.get("create_time", "")[:16]
+        content = msg.get("content", "")
+        for key in re.findall(r'img_v3_[a-zA-Z0-9_-]+', content):
+            if key not in key_to_msg:
+                key_to_msg[key] = (msg_id, sender, ct)
+
+    results = []
+    for idx, img_path in enumerate(image_files, 1):
+        key = img_path.stem  # e.g. "img_v3_02mn_xxx"
+        msg_info = key_to_msg.get(key, ("未知", "未知", ""))
+        msg_id, sender, msg_time = msg_info
+
+        print(f"  [{idx}/{len(image_files)}] 处理中: {img_path.name}...")
+
+        img_b64 = _compress_image_for_api(img_path)
+        if not img_b64:
+            continue
+
+        prompt = (
+            f"请描述这张图片，用中文回答并给出5个关键词标签。\n"
+            f"回答格式：\n描述：...\n标签：tag1,tag2,tag3,tag4,tag5\n"
+            f"[Image base64:{img_b64}]"
+        )
+
+        for attempt in range(3):
+            try:
+                resp = _requests.post(
+                    f"{MINIMAX_API_HOST}/v1/text/chatcompletion_v2",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json={"model": MINIMAX_MODEL, "messages": [{"role": "user", "content": prompt}]},
+                    timeout=60,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    choices = data.get("choices")
+                    if choices and choices[0].get("message", {}).get("content"):
+                        text = choices[0]["message"]["content"]
+                        # 解析描述和标签
+                        desc_match = re.search(r"描述[：:]\s*(.+?)(?:\n|$)", text, re.DOTALL)
+                        tags_match = re.search(r"标签[：:]\s*(.+?)(?:\n|$)", text, re.DOTALL)
+                        description = desc_match.group(1).strip() if desc_match else text[:100]
+                        tags_text = tags_match.group(1).strip() if tags_match else ""
+                        tags = [t.strip() for t in re.split(r"[,，、\n]", tags_text) if t.strip()][:5]
+                        results.append({
+                            "key": key,
+                            "filename": img_path.name,
+                            "message_id": msg_id,
+                            "message_time": msg_time,
+                            "sender": sender,
+                            "description": description,
+                            "tags": tags,
+                        })
+                        print(f"    完成: {img_path.name} - 描述: {description[:50]}...")
+                        break
+                    br = data.get("base_resp", {})
+                    if br.get("status_code") != 0:
+                        print(f"  API 错误 ({br.get('status_code')}): {br.get('status_msg', '')}")
+                elif resp.status_code in (429, 529):
+                    print(f"  服务过载（第 {attempt+1} 次重试）...")
+                    import time as _time
+                    _time.sleep(5 * (attempt + 1))
+                    continue
+                else:
+                    print(f"  API 错误 {resp.status_code}: {resp.text[:100]}")
+            except Exception as e:
+                print(f"  请求异常: {e}")
+
+        import time as _time
+        _time.sleep(1)  # 避免过快调用
+
+    index_data = {
+        "chat_id": (messages[0].get("chat_id", "") if messages else ""),
+        "generated_at": datetime.now().isoformat(),
+        "model": MINIMAX_MODEL,
+        "images": results,
+    }
+
+    index_file.write_text(json.dumps(index_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"  图片索引已保存: {index_file}（{len(results)} 张图片）")
+    return index_data
+
+
 def main():
     parser = argparse.ArgumentParser(description="飞书聊天记录导出工具")
     parser.add_argument("--chat-id", dest="chat_id", help="群聊ID (oc_xxx)")
@@ -919,6 +1201,8 @@ def main():
                         help="关闭 AI 文字摘要")
     parser.add_argument("--force-ai", dest="force_ai", action="store_true",
                         help="强制重新生成 AI 结果（忽略缓存）")
+    parser.add_argument("--ai-images", dest="ai_images", action="store_true",
+                        help="开启 AI 图片理解")
     args = parser.parse_args()
 
     if not args.chat_id and not args.user_id:
@@ -1121,6 +1405,14 @@ def main():
         ai_summary_data = generate_ai_summary(
             messages,
             output_dir,
+            force=getattr(args, 'force_ai', False)
+        )
+
+    # AI 图片理解生成
+    ai_image_index = None
+    if getattr(args, 'ai_images', False):
+        ai_image_index = generate_ai_image_index(
+            messages, output_dir, images_dir, resource_map,
             force=getattr(args, 'force_ai', False)
         )
 

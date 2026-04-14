@@ -323,7 +323,7 @@ messages.json
 - API key 只存在于 proxy.py 进程内存和系统环境变量（`MINIMAX_API_KEY`），不写入任何文件
 - HTML 中的 JS 只和 `localhost:8765` 通信，不会泄露 key
 - 聊天记录和理解结果全部存在本地，不经过第三方服务器
-- 启动时检查 `MINIMAX_API_KEY` 环境变量，不存在则报错退出
+- 启动时检查 `MINIMAX_API_KEY` 环境变量，不存在则 fallback 到 crayon-shinchan/config.js
 - API host 使用 `https://api.minimaxi.com`（与 `crayon-shinchan` 项目一致，Token Plan key 直接支持）
 
 ---
@@ -345,7 +345,10 @@ messages.json
    - ask.py CLI 工具：关键词检索 + MiniMax API（经 proxy.py）
    - 检索策略：Python 内置 `re` 模块，关键词匹配，加权排序，最多返回 10 条参考消息
 
-3. **第三阶段 [未开始]**：图片理解（`--ai-images`）+ HTML 对话面板
-   - export.py 同样直调 API，逐图理解，生成 `ai_image_index.json`
-   - HTML 面板：JS → proxy.py → MiniMax API（流式显示）
-   - RAG 检索增强（关键词 + 图片 tags 联合搜索）
+3. **第三阶段 [已完成]**：图片理解（`--ai-images`）+ HTML 对话面板
+   - `export.py` 直调 API，逐图理解，生成 `ai_image_index.json`
+   - `--ai-images` CLI 参数开启，默认关闭（需要时手动启用）
+   - 图片预处理：PIL 压缩至最大宽度 800px，JPEG 质量 85，base64 传入 API
+   - HTML 面板：右下角固定悬浮球，点击展开后可对话（流式 SSE 输出）
+   - 面板 JS 连接 `http://localhost:8765/ask`，解析 SSE 流式显示
+   - `proxy.py` 修复：`get_api_key()` 返回 None 代替 `exit(1)`（避免杀死进程）；新增 `_load_key_from_config()` fallback 从 crayon-shinchan/config.js 读取 key
