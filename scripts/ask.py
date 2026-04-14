@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-飞书聊天记录问答工具 - 基于关键词检索的 RAG 问答
+飞书聊天记录问答工具 - 基于完整上下文的无检索式问答
 用法: python3 scripts/ask.py --question "问题" --output ./results
 """
 
@@ -86,17 +86,42 @@ def format_context_messages(messages: list) -> str:
     return "\n".join(lines)
 
 
-def build_prompt(question: str, context: str, ai_summary: str = "") -> str:
+def build_full_context(question: str, messages: list, ai_summary: str = "",
+                       ai_image_index: dict = None) -> str:
     """
-    组装完整的 prompt
+    构建包含全部聊天记录的完整上下文字符串。
+    末尾包含 {question} 占位符，由 proxy.py 替换为实际问题。
     """
-    system = "你是一个聊天记录问答助手，根据提供的聊天记录回答用户问题。"
-    if ai_summary:
-        system += f"\n\n以下是 AI 生成的聊天摘要供参考：\n{ai_summary}"
+    # 格式化所有消息
+    msg_lines = []
+    for msg in messages:
+        sender = (msg.get("sender") or {}).get("name", "未知")
+        ct = msg.get("create_time", "")[:16]
+        content = msg.get("content", "")
+        msg_lines.append(f"[{ct}] {sender}: {content}")
 
-    return f"""system: {system}
-context: {context}
-user: {question}"""
+    msg_text = "\n".join(msg_lines)
+
+    parts = [
+        "你是一个飞书聊天记录问答助手。基于以下全部聊天记录回答用户问题。",
+        "如果用户问到图片相关的问题，请结合图片描述回答。",
+        "如果无法从聊天记录中找到答案，请如实告知。",
+        "",
+        "=== AI 摘要 ===",
+        ai_summary if ai_summary else "（无）",
+        "",
+        "=== 聊天记录 ===",
+        msg_text,
+    ]
+
+    if ai_image_index and ai_image_index.get("images"):
+        parts.extend(["", "=== 图片索引 ==="])
+        for img in ai_image_index["images"]:
+            parts.append(f"[{img['message_time']}] {img['sender']} [图片]: {img['description']}")
+
+    parts.extend(["", "=== 用户问题 ===", "{question}"])
+
+    return "\n".join(parts)
 
 
 def main():
@@ -136,30 +161,37 @@ def main():
         except Exception:
             pass
 
-    # 提取关键词
-    keywords = extract_keywords(args.question)
-    if not keywords:
-        print("警告: 未能从问题中提取关键词，将使用前 10 条消息作为上下文")
-        context_messages = messages[:10]
-    else:
-        # 搜索相关消息
-        context_messages = search_messages(messages, keywords)
-
-    # 组装 context
-    context = format_context_messages(context_messages)
+    # 读取 ai_image_index.json（如果存在）
+    ai_image_index = None
+    ai_image_index_file = output_dir / "ai_image_index.json"
+    if ai_image_index_file.exists():
+        try:
+            with open(ai_image_index_file, encoding="utf-8") as f:
+                ai_image_index = json.load(f)
+        except Exception:
+            pass
 
     # 检查 requests 是否可用
     if requests is None:
         print("错误: requests 库未安装，无法连接到 proxy.py", file=sys.stderr)
         return 1
 
-    # 调用 proxy.py
-    prompt = build_prompt(args.question, context, ai_summary)
+    # 构建完整上下文（包含全部消息）
+    full_context = build_full_context(
+        question=args.question,
+        messages=messages,
+        ai_summary=ai_summary,
+        ai_image_index=ai_image_index
+    )
 
     try:
         resp = requests.post(
             f"{args.proxy_url}/ask",
-            json={"question": args.question, "history": []},
+            json={
+                "question": args.question,
+                "history": [],
+                "context": full_context
+            },
             stream=True,
             timeout=120
         )
@@ -195,17 +227,12 @@ def main():
             pass
     print()
 
-    # 打印参考消息
-    if context_messages:
-        print("\n参考消息：")
-        for msg in context_messages:
-            sender = (msg.get("sender") or {}).get("name", "未知")
-            ct = msg.get("create_time", "")[:16]
-            content = msg.get("content", "")
-            # 内容截断到 200 字
-            if len(content) > 200:
-                content = content[:200] + "..."
-            print(f"[{ct}] {sender}: {content}")
+    # 打印上下文信息
+    print(f"\n上下文：共 {len(messages)} 条消息")
+    if ai_summary:
+        print(f"AI 摘要：{ai_summary[:100]}{'...' if len(ai_summary) > 100 else ''}")
+    if ai_image_index and ai_image_index.get("images"):
+        print(f"图片索引：{len(ai_image_index['images'])} 张图片已理解")
 
     return 0
 

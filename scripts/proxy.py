@@ -120,6 +120,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             data = json.loads(body)
             question = data.get("question", "")
             history = data.get("history", [])
+            context = data.get("context", None)  # 完整上下文字符串（包含 {question} 占位符）
         except (json.JSONDecodeError, KeyError) as e:
             print(f"400: {e}")
             self.send_json({"error": "invalid request"}, 400)
@@ -131,7 +132,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 messages.append({"role": "user", "content": h.get("content", "")})
             elif h.get("role") == "assistant":
                 messages.append({"role": "assistant", "content": h.get("content", "")})
-        messages.append({"role": "user", "content": question})
+
+        if context:
+            # 新协议：context 包含完整上下文（system + 全部消息 + {question} 占位符）
+            actual_content = context.replace("{question}", question)
+            messages.append({"role": "user", "content": actual_content})
+        else:
+            # 旧协议（向后兼容）：只用 question
+            messages.append({"role": "user", "content": question})
 
         api_key = get_api_key()
         if not api_key:

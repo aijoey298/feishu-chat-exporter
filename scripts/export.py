@@ -534,6 +534,7 @@ def generate_html(
     failed_count: int,
     ai_summary: Optional[dict] = None,
     ai_image_index: Optional[dict] = None,
+    include_context: bool = False,
 ) -> str:
     # AI 摘要 HTML 片段
     ai_summary_html = ""
@@ -552,6 +553,35 @@ def generate_html(
     <div class="ai-summary-text">{content}</div>
   </div>
 </div>"""
+
+    # 构建完整上下文字符串（嵌入 HTML 供 AI 面板使用）
+    context_str = ""
+    if include_context:
+        msg_lines = []
+        for msg in messages:
+            sender = (msg.get("sender") or {{}}).get("name", "未知")
+            ct = msg.get("create_time", "")[:16]
+            content = msg.get("content", "")
+            msg_lines.append(f"[{ct}] {sender}: {content}")
+        msg_text = "\n".join(msg_lines)
+
+        parts = [
+            "你是一个飞书聊天记录问答助手。基于以下全部聊天记录回答用户问题。",
+            "如果用户问到图片相关的问题，请结合图片描述回答。",
+            "如果无法从聊天记录中找到答案，请如实告知。",
+            "",
+            "=== AI 摘要 ===",
+            (ai_summary.get("content", "") if ai_summary else "（无）"),
+            "",
+            "=== 聊天记录 ===",
+            msg_text,
+        ]
+        if ai_image_index and ai_image_index.get("images"):
+            parts.extend(["", "=== 图片索引 ==="])
+            for img in ai_image_index["images"]:
+                parts.append(f"[{img['message_time']}] {img['sender']} [图片]: {img['description']}")
+        parts.extend(["", "=== 用户问题 ===", "{{question}}"])
+        context_str = "\n".join(parts)
 
     HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
@@ -667,6 +697,7 @@ function toggleAiSummary() {{
   </div>
 </div>
 <script>
+var __CHAT_CONTEXT__ = {json.dumps(context_str, ensure_ascii=False)};
 function toggleChatPanel() {{
   var body = document.getElementById('chatBody');
   var toggle = document.getElementById('chatToggle');
@@ -699,7 +730,7 @@ function sendChatMessage() {{
   fetch('http://localhost:8765/ask', {{
     method: 'POST',
     headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify({{question: question, history: []}})
+    body: JSON.stringify({{question: question, history: [], context: window.__CHAT_CONTEXT__ || null}})
   }})
   .then(function(resp) {{
     var reader = resp.body.getReader();
@@ -1440,6 +1471,8 @@ def main():
         embedded_count=embedded_count,
         failed_count=total_failed,
         ai_summary=ai_summary_data,
+        ai_image_index=ai_image_index,
+        include_context=True,
     )
 
     output_html = output_dir / "report_with_images.html"
