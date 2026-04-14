@@ -712,7 +712,7 @@ function sendChatMessage() {{
           return;
         }}
         var text = decoder.decode(result.value);
-        var lines = text.split('\n');
+        var lines = text.split('\\n');
         for (var i = 0; i < lines.length; i++) {{
           var line = lines[i].trim();
           if (line.startsWith('data: ')) {{

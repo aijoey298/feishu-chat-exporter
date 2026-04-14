@@ -73,11 +73,30 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def log_request_info(self):
         print(f"[proxy] {self.command} {self.path} → ", end="", flush=True)
 
-    def send_json(self, data, status=200):
+    def send_json(self, data, status=200, cors=False):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        if cors:
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode("utf-8"))
+        if data:
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+    def do_OPTIONS(self):
+        self.log_request_info()
+        if self.path == "/ask":
+            print("204")
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
+        else:
+            print("404")
+            self.send_response(404)
+            self.end_headers()
 
     def do_GET(self):
         self.log_request_info()
@@ -141,6 +160,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
 
         for raw in resp:
